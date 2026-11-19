@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classify, markReferences, orderSegments, segmentsToParagraphs } from '../lib/layout.mjs';
+import { classify, isCode, isProse, markReferences, orderSegments, segmentsToParagraphs } from '../lib/layout.mjs';
 import { parseNumbered } from '../lib/reader.mjs';
 import { isAllowed } from '../lib/server.mjs';
 import { autostartVbs, launcherVbs } from '../lib/desktop.mjs';
@@ -35,6 +35,41 @@ test('classify marks figure fragments, numbered headings and captions', () => {
   assert.equal(classify({ text: '3.2 Action Tokenization', lines: 1, h: 10 }, 10), 'heading');
   assert.equal(classify({ text: 'Figure 2: Overview of the model.', lines: 1, h: 9 }, 10), 'text');
   assert.equal(classify({ text: 'We train the policy on many robots and evaluate it.', lines: 2, h: 10 }, 10), 'text');
+});
+
+test('figure labels, crowded lines and code are not translated; small-print prose is', () => {
+  const m = { bodyH: 10, bodyW: 400 };
+  const box = (text, o) => ({ text, lines: 2, h: 10, x0: 0, x1: 400, crowded: 0, ...o });
+  // small font diagram labels (Voyager Fig. 4)
+  assert.equal(classify(box('Mine Wood Log Make Crafting Table Craft Wooden Pickaxe Craft Stone Sword', { h: 5.5, x1: 46, lines: 4 }), m), 'frag');
+  // caption continuation in small print stays translatable
+  assert.equal(classify(box('controls; u3 gathers weighted sample gradients from the four orange segments and sums them using reduction primitives.', { h: 8, x1: 245 }), m), 'text');
+  // body text wrapped beside a figure shares lines with labels but is prose
+  assert.equal(classify(box('and learning rate schedules inspired by the literature on scalable vision transformer training [22, 97]. Our work is the first to', { crowded: 2 }), m), 'text');
+  // table row
+  assert.equal(classify(box('Skate (m/s) ↓ R-prec. ↑ FID ↓ Joint rot. (deg.) ↓ Joint pos. (m) ↓', { crowded: 2 }), m), 'frag');
+  // code
+  assert.ok(isCode('await bot.pathfinder.goto(goal); // move next to the block'));
+  assert.equal(classify(box('async function craftItem(bot, name, count = 1) { const item = mcData.itemsByName[name]; }'), m), 'frag');
+  assert.ok(!isCode('Policy gradient methods [Schulman et al. 2015; Teh et al. 2017] have emerged as the algorithms of choice.'));
+  assert.ok(isProse('This is a sentence that has quite a few plain lowercase words in it.'));
+});
+
+test('numbered list items become separate paragraphs', () => {
+  const segs = [
+    seg('The input prompt to GPT-4 consists of several components:', 50, 300, 100),
+    seg('(1) Directives encouraging diverse behaviors and imposing', 50, 300, 112),
+    seg('constraints, such as the ultimate goal of the agent;', 50, 300, 124),
+    seg('(2) The agent’s current state, including inventory and', 50, 300, 136),
+  ].map((s) => ({ ...s, col: 'F' }));
+  const paras = segmentsToParagraphs(segs);
+  assert.deepEqual(paras.map((p) => p.text.slice(0, 3)), ['The', '(1)', '(2)']);
+});
+
+test('bibliography entries are marked even without a References heading', () => {
+  const pages = [{ paras: [{ text: '[47] Sergey Levine, Chelsea Finn. End-to-end training of deep visuomotor policies. JMLR, 2016.', lines: 2, kind: 'text' }, { text: 'We train for 10 epochs.', lines: 1, kind: 'text' }] }];
+  markReferences(pages);
+  assert.deepEqual(pages[0].paras.map((p) => p.kind), ['ref', 'text']);
 });
 
 test('reference list is marked and ends at the appendix', () => {

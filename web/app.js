@@ -129,7 +129,7 @@ function geometry(pg) {
   let target = Math.min(avail, 980);
   if (mode === 'dual') {
     // Page gets ~55%, translation the rest (24px gap); zoom only grows the page.
-    zw = Math.round(Math.max(260, Math.min(520, (avail - 24) * 0.45)));
+    zw = Math.round(Math.max(260, Math.min(600, (avail - 24) * 0.48)));
     target = avail - 24 - zw;
   }
   const scale = Math.max(0.4, Math.min(2.4, (target / pg.width) * state.zoom));
@@ -183,7 +183,9 @@ function buildRows() {
     row.style.setProperty('--zw', `${g.zw}px`);
     host.append(row);
     observer.observe(row);
-    return { pg, row, page, zh, g, rendered: null, zhState: null, zhData: new Map() };
+    const r = { pg, row, page, zh, g, rendered: null, zhState: null, zhData: new Map() };
+    hookPageHover(r);
+    return r;
   });
   updatePageInd();
 }
@@ -235,26 +237,89 @@ function paraNode(r, i) {
 
 function highlight(r, i, on) {
   r.page.querySelectorAll('.hl').forEach((n) => n.remove());
+  r.zh.querySelectorAll('.p.on').forEach((n) => n.classList.remove('on'));
   if (!on) return;
   const [x0, y0, x1, y1] = r.pg.paras[i].bbox;
   const s = r.g.scale;
   r.page.append(el('div', { className: 'hl', style: `left:${x0 * s - 3}px;top:${y0 * s - 2}px;width:${(x1 - x0) * s + 6}px;height:${(y1 - y0) * s + 4}px` }));
+  r.zh.querySelector(`.p[data-i="${i}"]`)?.classList.add('on');
+}
+
+// Pointing at a paragraph on the page highlights it and its translation.
+function hookPageHover(r) {
+  let cur = -1;
+  r.page.addEventListener('mousemove', (e) => {
+    if (state.mode !== 'dual' || window.getSelection()?.toString()) return;
+    const box = r.page.getBoundingClientRect();
+    const x = (e.clientX - box.left) / r.g.scale;
+    const y = (e.clientY - box.top) / r.g.scale;
+    const i = r.pg.paras.findIndex((p) => (p.kind === 'text' || p.kind === 'heading') && x >= p.bbox[0] - 2 && x <= p.bbox[2] + 2 && y >= p.bbox[1] - 2 && y <= p.bbox[3] + 2);
+    if (i === cur) return;
+    cur = i;
+    highlight(r, i, i >= 0);
+  });
+  r.page.addEventListener('mouseleave', () => {
+    cur = -1;
+    highlight(r, 0, false);
+  });
+}
+
+// Each translation sits at the height of its source paragraph; when one runs
+// longer than its source it pushes the next ones down. To stop that drift from
+// accumulating down the page, a finished page gets the largest font size (from
+// FONT_STEPS) at which its translations still end within the page.
+const FONT_STEPS = [[14, 1.7], [13.5, 1.65], [13, 1.6], [12.5, 1.55]];
+
+function placeZh(r) {
+  const GAP = 3;
+  const nodes = [...r.zh.querySelectorAll('.p')];
+  const heights = nodes.map((n) => n.offsetHeight); // read everything first, then write
+  const want = nodes.map((n) => r.pg.paras[Number(n.dataset.i)].bbox[1] * r.g.scale);
+  // Forward pass: never above the source paragraph, never overlapping.
+  const tops = [];
+  let bottom = 0;
+  for (let k = 0; k < nodes.length; k++) {
+    tops[k] = Math.max(want[k], k ? bottom + GAP : 0);
+    bottom = tops[k] + heights[k];
+  }
+  // Backward pass: if that runs past the page, pull paragraphs up into free
+  // space above them (e.g. beside a figure) so the error is spread out
+  // instead of piling up at the bottom.
+  let limit = r.g.ph;
+  for (let k = nodes.length - 1; k >= 0; k--) {
+    tops[k] = Math.max(0, Math.min(tops[k], limit - heights[k]));
+    limit = tops[k] - GAP;
+  }
+  bottom = 0;
+  for (let k = 0; k < nodes.length; k++) {
+    tops[k] = Math.max(tops[k], k ? bottom + GAP : 0);
+    bottom = tops[k] + heights[k];
+  }
+  nodes.forEach((n, k) => (n.style.top = `${tops[k]}px`));
+  r.zh.style.height = `${Math.max(r.g.ph, bottom)}px`;
+  return { bottom };
+}
+
+function setFont(r, step) {
+  r.font = step;
+  r.zh.style.setProperty('--zf', `${FONT_STEPS[step][0]}px`);
+  r.zh.style.setProperty('--zl', FONT_STEPS[step][1]);
 }
 
 function layoutZh(r) {
-  const nodes = [...r.zh.querySelectorAll('.p')];
   if (state.mode === 'zh') {
     r.zh.style.height = '';
+    r.zh.style.removeProperty('--zf');
+    r.zh.style.removeProperty('--zl');
     return;
   }
-  let bottom = 0;
-  for (const n of nodes) {
-    const y = r.pg.paras[Number(n.dataset.i)].bbox[1] * r.g.scale;
-    const top = Math.max(y, bottom + 4);
-    n.style.top = `${top}px`;
-    bottom = top + n.offsetHeight;
+  if (r.font === undefined) setFont(r, 0);
+  if (r.zhState !== 'done') return placeZh(r); // still streaming: keep the size steady
+  for (let s = 0; s < FONT_STEPS.length; s++) {
+    setFont(r, s);
+    const { bottom } = placeZh(r);
+    if (bottom <= r.g.ph + 4) return; // otherwise stay at the smallest readable size
   }
-  r.zh.style.height = `${Math.max(r.g.ph, bottom)}px`;
 }
 
 function drawZh(r) {
@@ -290,6 +355,7 @@ async function loadTranslation(r) {
       } else if (event === 'error') throw new Error(data.message);
     }
     r.zhState = 'done';
+    layoutZh(r);
   } catch (e) {
     r.zhState = null;
     r.zh.append(el('span', { className: 'status', textContent: `翻译失败：${e.message}（滚动回来会重试）` }));
