@@ -1,0 +1,7 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "paper-vault",
+  "version": "0.1.0",
+  "description": "本地论文库：PDF 自动总结入库，按记得的细节检索论文，查找相关工作（本地+网络）",
+  "skills": ["./skills/"]
+}

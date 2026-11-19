@@ -1,0 +1,19 @@
+{
+  "name": "paper-vault",
+  "version": "0.1.0",
+  "private": true,
+  "description": "本地论文库：PDF 自动总结入库，按记得的细节检索论文，查找相关工作",
+  "type": "module",
+  "bin": {
+    "pv": "bin/pv.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.5.438"
+  }
+}
