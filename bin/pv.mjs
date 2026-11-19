@@ -201,7 +201,7 @@ const commands = {
       dirs(); // fail early if the library is not configured
       const q = (s) => `""${s}""`;
       // Run hidden (window style 0) so no console window stays open.
-      const vbs = `' paper-vault inbox watcher — delete this file to stop autostart\r\nCreateObject("WScript.Shell").Run "${q(process.execPath)} ${q(path.join(HERE, 'pv.mjs'))} watch", 0, False\r\n`;
+      const vbs = `' paper-vault inbox watcher - delete this file to stop autostart\r\nCreateObject("WScript.Shell").Run "${q(process.execPath)} ${q(path.join(HERE, 'pv.mjs'))} watch", 0, False\r\n`;
       fs.writeFileSync(file, vbs);
       console.log(`已写入 ${file}\n下次登录自动运行。现在就启动可执行: wscript "${file}"`);
     } else if (sub === 'remove') {
