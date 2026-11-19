@@ -30,6 +30,10 @@ const HELP = `paper-vault — 本地论文库
   text <pdf>                抽取 PDF 文字到 .staging/<名>.txt（给 agent 读）
   prompt <pdf>              打印总结写作要求（不含论文文字）
   watch [--once]            监听 inbox，自动总结入库（--once 处理完现有文件就退出）
+  serve                     后台服务：论文小助手网页 + inbox 监听（开机自启运行的就是它）
+  open [描述]               打开论文小助手窗口（带描述时直接检索）
+  assistant install [--hotkey Ctrl+Alt+P] | remove | status
+                            开始菜单快捷方式 + 全局快捷键调出论文小助手
   link [remove]             把本仓库链接到 ~/.claude/skills，作为 Claude Code 插件加载
   autostart install|remove|status
                             开机自动运行 watcher（Windows 启动文件夹）
@@ -175,6 +179,49 @@ const commands = {
     await watch({ once: flag(args, '--once') });
   },
 
+  async serve() {
+    // One background process for everything: the assistant web server plus
+    // the inbox watcher (the watcher exits quietly if another one holds the lock).
+    const { startServer } = await import('../lib/server.mjs');
+    try {
+      const { url } = await startServer();
+      console.log(`论文小助手: ${url}`);
+    } catch (e) {
+      if (e.code === 'EADDRINUSE') {
+        console.log('论文小助手已在运行。');
+        return;
+      }
+      throw e;
+    }
+    const { watch } = await import('../lib/watch.mjs');
+    await watch();
+  },
+
+  async open(args) {
+    const { ensureServer, openWindow, baseUrl } = await import('../lib/desktop.mjs');
+    if (!(await ensureServer())) throw new UserError('论文小助手没能启动，运行 node pv.mjs serve 看报错');
+    const q = args.join(' ').trim();
+    const url = baseUrl() + (q ? `?q=${encodeURIComponent(q)}` : '');
+    openWindow(url);
+    console.log(url);
+  },
+
+  async assistant(args) {
+    const d = await import('../lib/desktop.mjs');
+    const sub = args[0] ?? 'status';
+    if (sub === 'install') {
+      const hotkey = opt(args, '--hotkey', undefined);
+      if (hotkey) writeConfig({ ...readConfig(), hotkey });
+      const r = d.installAssistant(hotkey);
+      console.log(`已创建开始菜单快捷方式: ${r.shortcut}\n快捷键: ${r.hotkey}（按下即可调出论文小助手）\n启动脚本: ${r.launcher}`);
+    } else if (sub === 'remove') {
+      d.removeAssistant();
+      console.log('已删除快捷方式和启动脚本。');
+    } else {
+      console.log(JSON.stringify({ url: d.baseUrl(), running: await d.isUp(), shortcut: fs.existsSync(d.shortcutFile()) ? d.shortcutFile() : null, hotkey: readConfig().hotkey ?? 'Ctrl+Alt+P' }, null, 2));
+    }
+  },
+
   link(args) {
     // Expose this checkout to Claude Code as a skills-dir plugin. A junction
     // (no admin rights needed on Windows) keeps node_modules next to the skills.
@@ -194,15 +241,14 @@ const commands = {
     console.log(`已链接: ${target} -> ${repo}\n新开的 Claude Code 会话里即可使用 /paper-vault:add、/paper-vault:search、/paper-vault:related`);
   },
 
-  autostart(args) {
+  async autostart(args) {
     const sub = args[0] ?? 'status';
     const file = startupFile();
     if (sub === 'install') {
       dirs(); // fail early if the library is not configured
-      const q = (s) => `""${s}""`;
-      // Run hidden (window style 0) so no console window stays open.
-      const vbs = `' paper-vault inbox watcher - delete this file to stop autostart\r\nCreateObject("WScript.Shell").Run "${q(process.execPath)} ${q(path.join(HERE, 'pv.mjs'))} watch", 0, False\r\n`;
-      fs.writeFileSync(file, vbs);
+      // Runs `pv serve` hidden (window style 0): inbox watcher + assistant server.
+      const { autostartVbs } = await import('../lib/desktop.mjs');
+      fs.writeFileSync(file, autostartVbs());
       console.log(`已写入 ${file}\n下次登录自动运行。现在就启动可执行: wscript "${file}"`);
     } else if (sub === 'remove') {
       if (fs.existsSync(file)) fs.unlinkSync(file);

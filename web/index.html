@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paper Vault 论文小助手</title>
+<link rel="stylesheet" href="/vendor/pdfjs/web/pdf_viewer.css">
+<link rel="stylesheet" href="/web/app.css">
+</head>
+<body>
+<aside id="side">
+  <form id="find" autocomplete="off">
+    <label for="q" class="sr">描述你要找的论文</label>
+    <textarea id="q" rows="2" placeholder="说说你记得的细节，比如：用了 Qwen 的 VLA，在 LIBERO 上测过"></textarea>
+    <button type="submit" id="find-btn" title="查找（Enter）">查找</button>
+  </form>
+  <nav id="tabs" role="tablist">
+    <button role="tab" id="tab-list" aria-selected="true" data-tab="list">论文</button>
+    <button role="tab" id="tab-chat" aria-selected="false" data-tab="chat" disabled>讲解</button>
+  </nav>
+  <section id="pane-list" class="pane" role="tabpanel">
+    <p id="list-note" class="note"></p>
+    <ol id="results"></ol>
+  </section>
+  <section id="pane-chat" class="pane" role="tabpanel" hidden>
+    <div id="chat-log"></div>
+    <div id="chat-quick">
+      <button type="button" data-ask="核心方法具体是怎么做的？请把关键模块和训练目标讲细一点。">方法细节</button>
+      <button type="button" data-ask="实验部分最重要的结论是什么？有哪些数字值得记住？">关键结果</button>
+      <button type="button" data-ask="这篇论文和我库里哪些论文最相关？分别是什么关系？">相关论文</button>
+      <button type="button" id="chat-reset" title="清空对话，重新讲解">重新讲解</button>
+    </div>
+    <form id="chat-form">
+      <label for="chat-input" class="sr">追问</label>
+      <textarea id="chat-input" rows="2" placeholder="追问这篇论文…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button type="submit">发送</button>
+    </form>
+  </section>
+</aside>
+
+<main id="reader">
+  <header id="bar" hidden>
+    <div id="paper-head">
+      <h1 id="paper-title"></h1>
+      <p id="paper-sub"></p>
+    </div>
+    <div id="controls">
+      <div class="seg" role="group" aria-label="显示方式">
+        <button data-mode="dual" aria-pressed="true">对照</button>
+        <button data-mode="orig" aria-pressed="false">原文</button>
+        <button data-mode="zh" aria-pressed="false">译文</button>
+      </div>
+      <div class="seg" role="group" aria-label="缩放">
+        <button id="zoom-out" title="缩小">−</button>
+        <button id="zoom-in" title="放大">+</button>
+      </div>
+      <span id="page-ind" aria-live="polite"></span>
+    </div>
+  </header>
+  <div id="pages" tabindex="-1"></div>
+  <div id="empty">
+    <p class="big">在左边描述一篇论文，或从列表里选一篇。</p>
+    <p class="hint">打开后左边讲解，右边是原文和中文对照。在原文里选中一段文字可以单独翻译。</p>
+  </div>
+</main>
+
+<div id="pop" hidden role="dialog" aria-label="选中文字的翻译">
+  <button id="pop-go" type="button">翻译选中文字</button>
+  <div id="pop-out"></div>
+</div>
+
+<script type="module" src="/web/app.js"></script>
+</body>
+</html>
