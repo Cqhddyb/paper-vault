@@ -119,3 +119,14 @@ test('childEnv drops host-session variables only', () => {
   const env = childEnv({ CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'x', CLAUDE_PID: '1', PATH: 'p', ANTHROPIC_BASE_URL: 'u' });
   assert.deepEqual(env, { PATH: 'p', ANTHROPIC_BASE_URL: 'u' });
 });
+
+test('transient gateway errors are retried, others fail at once', async () => {
+  const { withRetry } = await import('../lib/watch.mjs');
+  let n = 0;
+  const flaky = () => (++n < 3 ? Promise.reject(new Error('API Error: 502 Upstream service temporarily unavailable')) : Promise.resolve('ok'));
+  assert.equal(await withRetry(flaky, { waitMs: 1 }), 'ok');
+  assert.equal(n, 3);
+  let m = 0;
+  await assert.rejects(withRetry(() => (m++, Promise.reject(new Error('总结不合格'))), { waitMs: 1 }), /不合格/);
+  assert.equal(m, 1);
+});
