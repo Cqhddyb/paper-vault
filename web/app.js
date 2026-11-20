@@ -850,6 +850,13 @@ async function loadCompare(tab) {
   tab.view.replaceChildren(el('div', { className: 'cmp-inner' }, compareHeader(tab), tab.reportNode));
   const h = await api(`/api/compare?ids=${tab.ids.map(encodeURIComponent).join(',')}`).catch(() => ({ sessionId: null, messages: [] }));
   if (tab.closed) return;
+  // A saved comparison keeps the A/B/C labels it was written with, whatever
+  // order the papers were ticked in this time.
+  if (h.messages?.length && Array.isArray(h.ids) && h.ids.length === tab.ids.length && h.ids.join() !== tab.ids.join()) {
+    tab.ids = h.ids;
+    tab.view.querySelector('.cmp-papers').replaceWith(compareHeader(tab));
+    updateBar();
+  }
   tab.chat.sessionId = h.sessionId;
   const [first, report, ...rest] = h.messages;
   if (report) {
