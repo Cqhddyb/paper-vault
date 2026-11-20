@@ -9,16 +9,17 @@ const el = (tag, props = {}, ...kids) => {
   for (const k of kids) n.append(k);
   return n;
 };
-const api = async (path, body) => {
-  const r = await fetch(path, body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json', 'x-pv': '1' }, body: JSON.stringify(body) });
+const post = (body) => ({ method: 'POST', headers: { 'content-type': 'application/json', 'x-pv': '1' }, body: JSON.stringify(body) });
+const api = async (path, body, signal) => {
+  const r = await fetch(path, body === undefined ? { signal } : { ...post(body), signal });
   const j = await r.json();
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 };
 
 /** Read a text/event-stream response (fetch-based so POST works). */
-async function* sseStream(path, body) {
-  const r = await fetch(path, body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json', 'x-pv': '1' }, body: JSON.stringify(body) });
+async function* sseStream(path, body, signal) {
+  const r = await fetch(path, body === undefined ? { signal } : { ...post(body), signal });
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
   const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
   let buf = '';
@@ -37,17 +38,23 @@ async function* sseStream(path, body) {
   }
 }
 
+const LABELS = ['A', 'B', 'C', 'D', 'E'];
+const MAX_COMPARE = 5;
+
 const state = {
-  papers: [],
+  papers: [], // library cards
   listed: [],
-  paper: null, // { id, meta, summary, layout, doc }
+  sel: new Map(), // id -> card, papers ticked for comparison (in tick order)
+  tabs: [], // open documents, see newPaperTab / newCompareTab
+  active: null,
   mode: localStorage.getItem('pv.mode') || 'dual',
   zoom: Number(localStorage.getItem('pv.zoom') || 1),
-  chat: { sessionId: null, busy: false },
-  rows: [],
+  lastUserOpen: 0,
 };
 
-// ---- list & find ---------------------------------------------------------
+const cardOf = (id) => state.papers.find((p) => p.id === id) ?? state.listed.find((p) => p.id === id);
+
+// ---- list, search, selection ------------------------------------------------
 
 function metaLine(p) {
   const authors = (p.authors || []).slice(0, 3).join(', ') + ((p.authors || []).length > 3 ? ' 等' : '');
@@ -61,17 +68,65 @@ function renderList(items, note, { reasons = false } = {}) {
   const ol = $('#results');
   ol.replaceChildren();
   for (const p of items) {
-    const b = el('button', { type: 'button' },
+    const box = el('input', { type: 'checkbox', className: 'pick', checked: state.sel.has(p.id), title: '勾选 2 到 5 篇来对比方法' });
+    box.setAttribute('aria-label', `选来对比：${p.title}`);
+    box.onchange = () => toggleSel(p, box);
+    const b = el('button', { type: 'button', className: 'open' },
       el('span', { className: 'r-title', textContent: p.title || p.id }),
       el('span', { className: 'r-meta', textContent: metaLine(p) }),
     );
     if (reasons && p.reason) b.append(el('span', { className: 'r-why', textContent: p.reason }));
     else if (p.tldr) b.append(el('span', { className: 'r-tldr', textContent: p.tldr }));
-    if (state.paper?.id === p.id) b.setAttribute('aria-current', 'true');
-    b.onclick = () => openPaper(p.id);
-    ol.append(el('li', {}, b));
+    b.dataset.id = p.id;
+    b.onclick = () => {
+      state.lastUserOpen = Date.now();
+      openPaper(p.id, { focusChat: false });
+    };
+    ol.append(el('li', {}, box, b));
   }
+  markCurrent();
 }
+
+function markCurrent() {
+  const cur = activeTab();
+  const ids = cur?.kind === 'paper' ? [cur.id] : cur?.ids ?? [];
+  for (const b of document.querySelectorAll('#results button.open')) b.setAttribute('aria-current', String(ids.includes(b.dataset.id)));
+}
+
+function toggleSel(p, box) {
+  if (box.checked) {
+    if (state.sel.size >= MAX_COMPARE) {
+      box.checked = false;
+      flashNote(`最多同时对比 ${MAX_COMPARE} 篇`);
+      return;
+    }
+    state.sel.set(p.id, p);
+  } else state.sel.delete(p.id);
+  renderSelBar();
+}
+
+function renderSelBar() {
+  const n = state.sel.size;
+  $('#sel-bar').hidden = n === 0;
+  $('#sel-count').textContent = n < 2 ? `已选 ${n} 篇，再选 ${2 - n} 篇即可对比` : `已选 ${n} 篇`;
+  $('#sel-compare').disabled = n < 2;
+}
+
+let noteTimer;
+function flashNote(msg) {
+  const n = $('#sel-count');
+  const old = n.textContent;
+  n.textContent = msg;
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => (n.textContent = old), 1800);
+}
+
+$('#sel-clear').onclick = () => {
+  state.sel.clear();
+  for (const b of document.querySelectorAll('#results .pick')) b.checked = false;
+  renderSelBar();
+};
+$('#sel-compare').onclick = () => openCompare([...state.sel.keys()]);
 
 function busy(note) {
   $('#list-note').textContent = note;
@@ -82,8 +137,9 @@ let findSeq = 0;
 async function find(q) {
   q = q.trim();
   if (!q) return renderList(state.papers, `库里共 ${state.papers.length} 篇，最近添加的在前`);
-  selectTab('list');
+  selectSide('list');
   const seq = ++findSeq;
+  const startedAt = Date.now();
   const quick = await api(`/api/search?q=${encodeURIComponent(q)}`).catch(() => []);
   if (seq !== findSeq) return;
   renderList(quick, '', {});
@@ -92,8 +148,11 @@ async function find(q) {
     const r = await api('/api/find', { q });
     if (seq !== findSeq) return;
     if (!r.results.length) return renderList([], '没找到符合描述的论文。换几个记得的细节试试，比如用到的模型、数据集或任务。');
-    renderList(r.results, r.by === 'claude' ? (r.confident ? '最符合的一篇已经打开，其余备选：' : `找到 ${r.results.length} 篇可能符合的，点一篇打开：`) : '细筛失败，下面是关键词匹配结果：', { reasons: true });
-    if (r.confident) openPaper(r.results[0].id);
+    // Never override a paper the user already picked while the refinement ran.
+    const autoOpen = r.confident && state.lastUserOpen < startedAt;
+    const note = r.by !== 'claude' ? '细筛失败，下面是关键词匹配结果：' : autoOpen ? '最符合的一篇已经打开，其余备选：' : `找到 ${r.results.length} 篇可能符合的，点一篇打开：`;
+    renderList(r.results, note, { reasons: true });
+    if (autoOpen) openPaper(r.results[0].id, { focusChat: false });
   } catch (e) {
     if (seq === findSeq) $('#list-note').textContent = `细筛失败（${e.message}），下面是关键词匹配结果。`;
     $('#list-note').classList.remove('busy');
@@ -111,24 +170,182 @@ $('#q').addEventListener('keydown', (e) => {
   }
 });
 
-// ---- tabs ---------------------------------------------------------------------
+// ---- side panel ------------------------------------------------------------
 
-function selectTab(name) {
+function selectSide(name) {
   for (const t of document.querySelectorAll('#tabs button')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
   $('#pane-list').hidden = name !== 'list';
   $('#pane-chat').hidden = name !== 'chat';
 }
-for (const t of document.querySelectorAll('#tabs button')) t.onclick = () => selectTab(t.dataset.tab);
+for (const t of document.querySelectorAll('#tabs button')) t.onclick = () => selectSide(t.dataset.tab);
 
-// ---- reader -------------------------------------------------------------------
+// ---- document tabs -----------------------------------------------------------
 
-function geometry(pg) {
-  const avail = $('#pages').clientWidth - 48 - 16; // padding + scrollbar
-  const mode = state.mode;
+const activeTab = () => state.tabs.find((t) => t.key === state.active) ?? null;
+
+function addTab(tab) {
+  tab.view.hidden = true;
+  $('#views').append(tab.view);
+  tab.button = el('div', { className: `doc-tab${tab.kind === 'compare' ? ' cmp' : ''}`, role: 'tab', tabIndex: 0 });
+  tab.label = el('span', { className: 'dt-label' });
+  const close = el('button', { type: 'button', className: 'dt-close', textContent: '×', title: '关闭' });
+  close.setAttribute('aria-label', '关闭这个标签页');
+  close.onclick = (e) => {
+    e.stopPropagation();
+    closeTab(tab.key);
+  };
+  tab.button.append(tab.label, close);
+  tab.button.onclick = () => activate(tab.key);
+  tab.button.onkeydown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') activate(tab.key);
+  };
+  tab.button.onauxclick = (e) => e.button === 1 && closeTab(tab.key);
+  $('#doc-tabs').append(tab.button);
+  state.tabs.push(tab);
+  setTabTitle(tab, tab.title);
+  return tab;
+}
+
+function setTabTitle(tab, title) {
+  tab.title = title;
+  tab.label.textContent = title;
+  tab.button.title = title;
+  if (state.active === tab.key) updateBar();
+}
+
+function activate(key) {
+  const tab = state.tabs.find((t) => t.key === key);
+  if (!tab) return;
+  const prev = activeTab();
+  if (prev && prev !== tab && prev.kind === 'paper') prev.scrollTop = prev.view.scrollTop;
+  state.active = key;
+  for (const t of state.tabs) {
+    t.view.hidden = t !== tab;
+    t.button.setAttribute('aria-selected', String(t === tab));
+  }
+  tab.button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  $('#empty').hidden = true;
+  $('#bar').hidden = false;
+  $('#tab-chat').disabled = false;
+  $('#tab-chat').textContent = tab.kind === 'compare' ? '对比追问' : '讲解';
+  $('#chat-host').replaceChildren(tab.chatLog);
+  renderQuick(tab);
+  updateBar();
+  markCurrent();
+  if (tab.kind === 'paper') {
+    history.replaceState(null, '', `?id=${encodeURIComponent(tab.id)}`);
+    if (!tab.started) loadPaper(tab);
+    else {
+      relayoutTab(tab);
+      tab.view.scrollTop = tab.scrollTop ?? 0;
+    }
+  } else if (!tab.started) loadCompare(tab);
+}
+
+function closeTab(key) {
+  const i = state.tabs.findIndex((t) => t.key === key);
+  if (i < 0) return;
+  const tab = state.tabs[i];
+  tab.closed = true;
+  tab.abort?.abort();
+  tab.observer?.disconnect();
+  tab.task?.destroy();
+  tab.view.remove();
+  tab.button.remove();
+  tab.chatLog.remove();
+  state.tabs.splice(i, 1);
+  if (state.active === key) {
+    state.active = null;
+    const next = state.tabs[i] ?? state.tabs[i - 1];
+    if (next) activate(next.key);
+    else {
+      $('#empty').hidden = false;
+      $('#bar').hidden = true;
+      $('#tab-chat').disabled = true;
+      $('#chat-host').replaceChildren();
+      selectSide('list');
+      history.replaceState(null, '', location.pathname);
+      document.title = 'Paper Vault 论文小助手';
+      markCurrent();
+    }
+  }
+}
+
+function updateBar() {
+  const tab = activeTab();
+  if (!tab) return;
+  const isPaper = tab.kind === 'paper';
+  $('#controls').hidden = !isPaper;
+  if (isPaper) {
+    const info = tab.info ?? cardOf(tab.id) ?? {};
+    $('#paper-title').textContent = info.title ?? tab.title;
+    $('#paper-sub').textContent = metaLine(info);
+    document.title = `${info.title ?? tab.title} · Paper Vault`;
+    updatePageInd();
+  } else {
+    $('#paper-title').textContent = `方法对比：${tab.ids.length} 篇`;
+    $('#paper-sub').textContent = tab.ids.map((id, k) => `${LABELS[k]} ${cardOf(id)?.title ?? id}`).join('；');
+    document.title = `方法对比 · Paper Vault`;
+  }
+}
+
+$('#hide-btn').onclick = () => api('/api/window', { action: 'hide' }).catch(() => {});
+
+// ---- paper tabs -----------------------------------------------------------------
+
+function newPaperTab(id, { autoExplain }) {
+  const card = cardOf(id);
+  return addTab({
+    key: `p:${id}`,
+    kind: 'paper',
+    id,
+    title: card?.title ?? id,
+    view: el('div', { className: `pages mode-${state.mode}`, tabIndex: -1 }),
+    chatLog: el('div', { className: 'chat-log' }),
+    chat: { sessionId: null, busy: false },
+    autoExplain,
+    rows: [],
+  });
+}
+
+/** Open (or switch to) a paper's tab. */
+function openPaper(id, { autoExplain = true, focusChat = true } = {}) {
+  const key = `p:${id}`;
+  let tab = state.tabs.find((t) => t.key === key);
+  if (!tab) tab = newPaperTab(id, { autoExplain });
+  activate(key);
+  if (focusChat) selectSide('chat');
+  return tab;
+}
+
+async function loadPaper(tab) {
+  tab.started = true;
+  tab.view.replaceChildren(el('p', { className: 'loading', textContent: '正在打开论文…' }));
+  tab.chatLog.replaceChildren();
+  try {
+    const [info, layout] = await Promise.all([api(`/api/paper/${tab.id}`), api(`/api/paper/${tab.id}/layout`)]);
+    if (tab.closed) return;
+    tab.info = info;
+    tab.layout = layout;
+    setTabTitle(tab, info.title);
+    tab.task = pdfjs.getDocument({ url: `/api/paper/${tab.id}/pdf`, isEvalSupported: false });
+    tab.doc = await tab.task.promise;
+    if (tab.closed) return;
+    buildRows(tab);
+    loadChat(tab);
+  } catch (e) {
+    if (tab.closed) return;
+    tab.started = false; // let a later activation retry
+    tab.view.replaceChildren(el('p', { className: 'loading err', textContent: `打开失败：${e.message}。关闭这个标签页后可以重试。` }));
+  }
+}
+
+function geometry(tab, pg) {
+  const host = tab.view.clientWidth || $('#views').clientWidth;
+  const avail = host - 48 - 16; // padding + scrollbar
   let zw = Math.min(760, avail);
   let target = Math.min(avail, 980);
-  if (mode === 'dual') {
-    // Page gets ~55%, translation the rest (24px gap); zoom only grows the page.
+  if (state.mode === 'dual') {
     zw = Math.round(Math.max(260, Math.min(600, (avail - 24) * 0.48)));
     target = avail - 24 - zw;
   }
@@ -136,67 +353,50 @@ function geometry(pg) {
   return { scale, pw: Math.round(pg.width * scale), ph: Math.round(pg.height * scale), zw };
 }
 
-let observer;
-let renderGen = 0;
-
-async function openPaper(id) {
-  if (state.paper?.id === id) return selectTab('chat');
-  const gen = ++renderGen;
-  const [info, layout] = await Promise.all([api(`/api/paper/${id}`), api(`/api/paper/${id}/layout`)]);
-  if (gen !== renderGen) return;
-  state.paper?.doc?.destroy();
-  const doc = await pdfjs.getDocument({ url: `/api/paper/${id}/pdf`, isEvalSupported: false }).promise;
-  if (gen !== renderGen) return doc.destroy();
-  state.paper = { id, info, layout, doc };
-  history.replaceState(null, '', `?id=${encodeURIComponent(id)}`);
-  document.title = `${info.title} · Paper Vault`;
-  $('#empty').hidden = true;
-  $('#bar').hidden = false;
-  $('#paper-title').textContent = info.title;
-  $('#paper-sub').textContent = metaLine(info);
-  for (const b of document.querySelectorAll('#results button')) b.toggleAttribute('aria-current', false);
-  [...document.querySelectorAll('#results li')].find((li, i) => state.listed[i]?.id === id)?.querySelector('button').setAttribute('aria-current', 'true');
-  buildRows();
-  $('#tab-chat').disabled = false;
-  selectTab('chat');
-  loadChat();
+function sizeRow(r) {
+  r.row.style.setProperty('--pw', `${r.g.pw}px`);
+  r.row.style.setProperty('--ph', `${r.g.ph}px`);
+  r.row.style.setProperty('--zw', `${r.g.zw}px`);
 }
 
-function buildRows() {
-  const P = state.paper;
-  const host = $('#pages');
-  host.className = `mode-${state.mode}`;
+function buildRows(tab) {
+  const host = tab.view;
+  host.className = `pages mode-${state.mode}`;
   host.replaceChildren();
   host.scrollTop = 0;
-  observer?.disconnect();
-  observer = new IntersectionObserver(onVisible, { root: host, rootMargin: '600px 0px' });
-  state.rows = P.layout.pages.map((pg) => {
-    const g = geometry(pg);
+  tab.observer = new IntersectionObserver((entries) => onVisible(tab, entries), { root: host, rootMargin: '800px 0px' });
+  tab.rows = tab.layout.pages.map((pg) => {
     const page = el('div', { className: 'page' });
     page.append(el('span', { className: 'num', textContent: `第 ${pg.page} 页` }));
     const zh = el('div', { className: 'zh' });
     zh.dataset.page = pg.page;
     const row = el('div', { className: 'row' }, page, zh);
     row.dataset.page = pg.page;
-    row.style.setProperty('--pw', `${g.pw}px`);
-    row.style.setProperty('--ph', `${g.ph}px`);
-    row.style.setProperty('--zw', `${g.zw}px`);
     host.append(row);
-    observer.observe(row);
-    const r = { pg, row, page, zh, g, rendered: null, zhState: null, zhData: new Map() };
+    const r = { tab, pg, row, page, zh, g: geometry(tab, pg), rendered: null, zhState: null, zhData: new Map() };
+    sizeRow(r);
     hookPageHover(r);
+    tab.observer.observe(row);
     return r;
   });
+  host.addEventListener('scroll', () => tab === activeTab() && updatePageInd(), { passive: true });
   updatePageInd();
 }
 
-function onVisible(entries) {
+function onVisible(tab, entries) {
   for (const e of entries) {
-    if (!e.isIntersecting) continue;
-    const r = state.rows[Number(e.target.dataset.page) - 1];
+    const r = tab.rows[Number(e.target.dataset.page) - 1];
+    if (!e.isIntersecting) {
+      // Free canvases far from view so several open papers stay light.
+      if (r.rendered) {
+        r.rendered = null;
+        r.page.querySelectorAll('canvas, .textLayer').forEach((n) => n.remove());
+      }
+      continue;
+    }
     if (state.mode !== 'zh') renderPage(r);
     loadTranslation(r);
-    const next = state.rows[r.pg.page];
+    const next = tab.rows[r.pg.page];
     if (next) loadTranslation(next); // prefetch one page ahead
   }
 }
@@ -205,9 +405,9 @@ async function renderPage(r) {
   const key = `${r.g.scale}`;
   if (r.rendered === key) return;
   r.rendered = key;
-  const gen = renderGen;
-  const page = await state.paper.doc.getPage(r.pg.page);
-  if (gen !== renderGen) return;
+  const tab = r.tab;
+  const page = await tab.doc.getPage(r.pg.page);
+  if (tab.closed || r.rendered !== key) return;
   const vp = page.getViewport({ scale: r.g.scale });
   const dpr = window.devicePixelRatio || 1;
   const canvas = el('canvas', { width: Math.floor(vp.width * dpr), height: Math.floor(vp.height * dpr) });
@@ -215,7 +415,7 @@ async function renderPage(r) {
   r.page.style.setProperty('--total-scale-factor', r.g.scale);
   r.page.style.setProperty('--scale-factor', r.g.scale);
   await page.render({ canvas, canvasContext: canvas.getContext('2d'), viewport: vp, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null }).promise;
-  if (gen !== renderGen || r.rendered !== key) return;
+  if (tab.closed || r.rendered !== key) return;
   r.page.querySelectorAll('canvas, .textLayer').forEach((n) => n.remove());
   r.page.prepend(canvas);
   r.page.append(text);
@@ -264,10 +464,10 @@ function hookPageHover(r) {
   });
 }
 
-// Each translation sits at the height of its source paragraph; when one runs
-// longer than its source it pushes the next ones down. To stop that drift from
-// accumulating down the page, a finished page gets the largest font size (from
-// FONT_STEPS) at which its translations still end within the page.
+// Each translation sits at the height of its source paragraph; a finished page
+// gets the largest font (FONT_STEPS) at which its translations fit the page, and
+// a backward pass pulls paragraphs up into free space so any misalignment is
+// spread out instead of piling up at the bottom.
 const FONT_STEPS = [[14, 1.7], [13.5, 1.65], [13, 1.6], [12.5, 1.55]];
 
 function placeZh(r) {
@@ -275,16 +475,12 @@ function placeZh(r) {
   const nodes = [...r.zh.querySelectorAll('.p')];
   const heights = nodes.map((n) => n.offsetHeight); // read everything first, then write
   const want = nodes.map((n) => r.pg.paras[Number(n.dataset.i)].bbox[1] * r.g.scale);
-  // Forward pass: never above the source paragraph, never overlapping.
   const tops = [];
   let bottom = 0;
   for (let k = 0; k < nodes.length; k++) {
     tops[k] = Math.max(want[k], k ? bottom + GAP : 0);
     bottom = tops[k] + heights[k];
   }
-  // Backward pass: if that runs past the page, pull paragraphs up into free
-  // space above them (e.g. beside a figure) so the error is spread out
-  // instead of piling up at the bottom.
   let limit = r.g.ph;
   for (let k = nodes.length - 1; k >= 0; k--) {
     tops[k] = Math.max(0, Math.min(tops[k], limit - heights[k]));
@@ -307,6 +503,7 @@ function setFont(r, step) {
 }
 
 function layoutZh(r) {
+  if (r.tab.view.hidden) return; // measured when the tab is shown again
   if (state.mode === 'zh') {
     r.zh.style.height = '';
     r.zh.style.removeProperty('--zf');
@@ -318,7 +515,7 @@ function layoutZh(r) {
   for (let s = 0; s < FONT_STEPS.length; s++) {
     setFont(r, s);
     const { bottom } = placeZh(r);
-    if (bottom <= r.g.ph + 4) return; // otherwise stay at the smallest readable size
+    if (bottom <= r.g.ph + 4) return;
   }
 }
 
@@ -327,9 +524,8 @@ function drawZh(r) {
   r.zh.replaceChildren(...items.map(({ i }) => paraNode(r, i)));
   const refs = r.pg.paras.filter((p) => p.kind === 'ref').length;
   if (refs) {
-    const last = r.pg.paras.findIndex((p) => p.kind === 'ref');
     const n = el('p', { className: 'p refs', textContent: `参考文献 ${refs} 条（不翻译）` });
-    n.dataset.i = last;
+    n.dataset.i = r.pg.paras.findIndex((p) => p.kind === 'ref');
     r.zh.append(n);
   }
   if (!items.length && !refs) r.zh.append(el('span', { className: 'status', textContent: '本页没有可翻译的正文' }));
@@ -340,10 +536,10 @@ async function loadTranslation(r) {
   if (r.zhState) return;
   r.zhState = 'loading';
   drawZh(r);
-  const gen = renderGen;
+  const tab = r.tab;
   try {
-    for await (const { event, data } of sseStream(`/api/paper/${state.paper.id}/zh/${r.pg.page}`)) {
-      if (gen !== renderGen) return;
+    for await (const { event, data } of sseStream(`/api/paper/${tab.id}/zh/${r.pg.page}`)) {
+      if (tab.closed) return;
       if (event === 'para') {
         r.zhData.set(data.i, data.zh);
         const n = r.zh.querySelector(`.p[data-i="${data.i}"]`);
@@ -357,24 +553,23 @@ async function loadTranslation(r) {
     r.zhState = 'done';
     layoutZh(r);
   } catch (e) {
+    if (tab.closed) return;
     r.zhState = null;
     r.zh.append(el('span', { className: 'status', textContent: `翻译失败：${e.message}（滚动回来会重试）` }));
   }
 }
 
-function relayout() {
-  if (!state.paper) return;
-  $('#pages').className = `mode-${state.mode}`;
-  for (const r of state.rows) {
-    r.g = geometry(r.pg);
-    r.row.style.setProperty('--pw', `${r.g.pw}px`);
-    r.row.style.setProperty('--ph', `${r.g.ph}px`);
-    r.row.style.setProperty('--zw', `${r.g.zw}px`);
+function relayoutTab(tab) {
+  if (tab.kind !== 'paper' || !tab.rows.length || tab.view.hidden) return;
+  tab.view.className = `pages mode-${state.mode}`;
+  for (const r of tab.rows) {
+    r.g = geometry(tab, r.pg);
+    sizeRow(r);
     layoutZh(r);
   }
   // Re-render what is on screen at the new scale.
-  observer.disconnect();
-  for (const r of state.rows) observer.observe(r.row);
+  tab.observer.disconnect();
+  for (const r of tab.rows) tab.observer.observe(r.row);
 }
 
 for (const b of document.querySelectorAll('[data-mode]')) {
@@ -383,51 +578,74 @@ for (const b of document.querySelectorAll('[data-mode]')) {
     state.mode = b.dataset.mode;
     localStorage.setItem('pv.mode', state.mode);
     for (const x of document.querySelectorAll('[data-mode]')) x.setAttribute('aria-pressed', String(x === b));
-    relayout();
+    relayoutTab(activeTab());
   };
 }
 const zoom = (f) => {
   state.zoom = Math.max(0.6, Math.min(2, +(state.zoom * f).toFixed(2)));
   localStorage.setItem('pv.zoom', state.zoom);
-  relayout();
+  relayoutTab(activeTab());
 };
 $('#zoom-in').onclick = () => zoom(1.15);
 $('#zoom-out').onclick = () => zoom(1 / 1.15);
 let resizeT;
 window.addEventListener('resize', () => {
   clearTimeout(resizeT);
-  resizeT = setTimeout(relayout, 150);
+  resizeT = setTimeout(() => activeTab() && relayoutTab(activeTab()), 150);
 });
 
 function updatePageInd() {
-  if (!state.paper) return;
-  const host = $('#pages');
+  const tab = activeTab();
+  if (tab?.kind !== 'paper' || !tab.rows.length) return void ($('#page-ind').textContent = '');
+  const host = tab.view;
   const mid = host.scrollTop + host.clientHeight / 3;
-  const r = state.rows.find((x) => x.row.offsetTop + x.row.offsetHeight > mid) ?? state.rows.at(-1);
-  $('#page-ind').textContent = `${r.pg.page} / ${state.rows.length} 页`;
-}
-$('#pages').addEventListener('scroll', updatePageInd, { passive: true });
-
-function goPage(n) {
-  state.rows[n - 1]?.row.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const r = tab.rows.find((x) => x.row.offsetTop + x.row.offsetHeight > mid) ?? tab.rows.at(-1);
+  $('#page-ind').textContent = `${r.pg.page} / ${tab.rows.length} 页`;
 }
 
-// ---- chat --------------------------------------------------------------------
+function goPage(tab, n) {
+  const go = () => tab.rows[n - 1]?.row.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (tab.rows.length) return go();
+  // Not loaded yet (e.g. opened from a comparison): wait for it.
+  const t = setInterval(() => {
+    if (tab.closed) return clearInterval(t);
+    if (tab.rows.length) {
+      clearInterval(t);
+      setTimeout(go, 50);
+    }
+  }, 200);
+}
 
-function linkPages(root) {
+// ---- markdown & page links --------------------------------------------------------
+
+const PAGE_RE = /第\s*(\d+)\s*(?:[-–~、,，至到和]\s*\d+\s*)*页/g;
+const LABEL_PAGE_RE = /([A-E])\s*(?:的)?\s*第\s*(\d+)\s*(?:[-–~、,，至到和]\s*\d+\s*)*页/g;
+
+/** Make "第 N 页" (paper tab) or "A 第 N 页" (comparison) clickable. */
+function linkPages(root, tab) {
+  const re = tab.kind === 'compare' ? LABEL_PAGE_RE : PAGE_RE;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const hits = [];
-  while (walker.nextNode()) if (/第\s*\d+\s*(?:[-–~、,，至到和]\s*\d+\s*)*页/.test(walker.currentNode.nodeValue)) hits.push(walker.currentNode);
+  while (walker.nextNode()) {
+    re.lastIndex = 0;
+    if (re.test(walker.currentNode.nodeValue)) hits.push(walker.currentNode);
+  }
   for (const t of hits) {
     const frag = document.createDocumentFragment();
     let last = 0;
     const s = t.nodeValue;
-    for (const m of s.matchAll(/第\s*(\d+)\s*(?:[-–~、,，至到和]\s*\d+\s*)*页/g)) {
+    re.lastIndex = 0;
+    for (const m of s.matchAll(re)) {
       frag.append(s.slice(last, m.index));
       const a = el('a', { className: 'pg', textContent: m[0], href: '#' });
       a.onclick = (e) => {
         e.preventDefault();
-        goPage(Number(m[1]));
+        if (tab.kind === 'compare') {
+          const id = tab.ids[LABELS.indexOf(m[1])];
+          if (!id) return;
+          const pt = openPaper(id, { autoExplain: false, focusChat: false });
+          goPage(pt, Number(m[2]));
+        } else goPage(tab, Number(m[1]));
       };
       frag.append(a);
       last = m.index + m[0].length;
@@ -437,84 +655,147 @@ function linkPages(root) {
   }
 }
 
-function renderMd(node, md) {
+function renderMd(node, md, tab) {
   node.innerHTML = marked.parse(md, { async: false });
   // Model output is untrusted: drop anything executable that marked passed through.
-  node.querySelectorAll('script, iframe, object, embed, style, link').forEach((n) => n.remove());
+  node.querySelectorAll('script, iframe, object, embed, style, link, form').forEach((n) => n.remove());
   node.querySelectorAll('*').forEach((n) => {
-    for (const a of [...n.attributes]) if (/^on/i.test(a.name) || (/^(href|src)$/i.test(a.name) && /^\s*javascript:/i.test(a.value))) n.removeAttribute(a.name);
+    for (const a of [...n.attributes]) if (/^on/i.test(a.name) || (/^(href|src)$/i.test(a.name) && /^\s*(javascript|data):/i.test(a.value))) n.removeAttribute(a.name);
   });
-  linkPages(node);
+  node.querySelectorAll('table').forEach((t) => t.replaceWith(el('div', { className: 'table-wrap' }, t.cloneNode(true))));
+  linkPages(node, tab);
 }
 
-function addMsg(role, text) {
-  const n = el('div', { className: `msg ${role}` });
-  if (role === 'bot') renderMd(n, text);
-  else n.textContent = text;
-  $('#chat-log').append(n);
-  return n;
-}
-
-function summaryCard() {
-  const i = state.paper.info;
-  return el('div', { className: 'summary-card' }, el('strong', { textContent: '一句话' }), document.createTextNode(i.tldr || '（无）'));
-}
-
-async function loadChat() {
-  const log = $('#chat-log');
-  log.replaceChildren(summaryCard());
-  const id = state.paper.id;
-  const h = await api(`/api/paper/${id}/chat`);
-  if (state.paper?.id !== id) return;
-  state.chat.sessionId = h.sessionId;
-  for (const m of h.messages) addMsg(m.role === 'user' ? 'user' : 'bot', m.content);
-  if (!h.messages.length) ask('');
-  else log.scrollTop = 0;
-}
-
-async function ask(message) {
-  if (state.chat.busy || !state.paper) return;
-  state.chat.busy = true;
-  const id = state.paper.id;
-  if (message) addMsg('user', message);
-  const bot = addMsg('bot', '');
-  bot.textContent = message ? '思考中…' : '正在通读全文并准备讲解…';
+/** Stream an answer into `node`, re-rendering markdown at most once per frame. */
+async function streamInto(node, tab, path, body, scroller) {
   let text = '';
   let raf = 0;
-  const log = $('#chat-log');
+  tab.abort = new AbortController();
   try {
-    for await (const { event, data } of sseStream('/api/chat', { id, sessionId: state.chat.sessionId, message })) {
-      if (state.paper?.id !== id) break;
+    for await (const { event, data } of sseStream(path, body, tab.abort.signal)) {
+      if (tab.closed) return null;
       if (event === 'delta') {
         text += data;
         if (!raf)
           raf = requestAnimationFrame(() => {
             raf = 0;
-            const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-            renderMd(bot, text);
-            if (stick) log.scrollTop = log.scrollHeight;
+            const stick = scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+            renderMd(node, text, tab);
+            if (stick) scroller.scrollTop = scroller.scrollHeight;
           });
       } else if (event === 'done') {
-        state.chat.sessionId = data.sessionId;
         cancelAnimationFrame(raf);
-        renderMd(bot, data.text || text);
-        if (data.cost) bot.append(el('span', { className: 'cost', textContent: `本轮约 $${data.cost.toFixed(3)}` }));
+        renderMd(node, data.text || text, tab);
+        if (data.cost) node.append(el('span', { className: 'cost', textContent: `本轮约 $${data.cost.toFixed(3)}` }));
+        return data;
       } else if (event === 'error') throw new Error(data.message);
     }
+    return null;
   } catch (e) {
-    bot.classList.add('err');
-    bot.textContent = `讲解失败：${e.message}`;
-  } finally {
-    state.chat.busy = false;
+    if (tab.closed || e.name === 'AbortError') return null;
+    node.classList.add('err');
+    node.textContent = `出错了：${e.message}`;
+    return null;
+  }
+}
+
+// ---- chat (per tab) -----------------------------------------------------------------
+
+const QUICK = {
+  paper: [
+    ['方法细节', '核心方法具体是怎么做的？请把关键模块和训练目标讲细一点。'],
+    ['关键结果', '实验部分最重要的结论是什么？有哪些数字值得记住？'],
+    ['相关论文', '这篇论文和我库里哪些论文最相关？分别是什么关系？'],
+  ],
+  compare: [
+    ['适用场景', '这几篇各自最适合什么场景？我在什么情况下该选哪一个？'],
+    ['组合思路', '如果把这几篇的方法组合起来，最有希望的方案是什么？请给出具体设计和要验证的实验。'],
+    ['共同基准', '这几篇有没有在相同的基准或任务上评测？把能直接比较的数字整理成一张表。'],
+  ],
+};
+
+function renderQuick(tab) {
+  const host = $('#chat-quick');
+  host.replaceChildren(
+    ...QUICK[tab.kind].map(([label, q]) => {
+      const b = el('button', { type: 'button', textContent: label });
+      b.onclick = () => ask(tab, q);
+      return b;
+    }),
+  );
+  const reset = el('button', { type: 'button', textContent: tab.kind === 'compare' ? '重新对比' : '重新讲解', title: '清空对话重新生成' });
+  reset.onclick = () => resetChat(tab);
+  host.append(reset);
+  $('#chat-input').placeholder = tab.kind === 'compare' ? '追问这几篇论文的对比…（Enter 发送）' : '追问这篇论文…（Enter 发送，Shift+Enter 换行）';
+}
+
+function addMsg(tab, role, text) {
+  const n = el('div', { className: `msg ${role}` });
+  if (role === 'bot') renderMd(n, text, tab);
+  else n.textContent = text;
+  tab.chatLog.append(n);
+  return n;
+}
+
+function summaryCard(tab) {
+  return el('div', { className: 'summary-card' }, el('strong', { textContent: '一句话' }), document.createTextNode(tab.info?.tldr || '（无）'));
+}
+
+async function loadChat(tab) {
+  tab.chatLog.replaceChildren(summaryCard(tab));
+  const h = await api(`/api/paper/${tab.id}/chat`).catch(() => ({ sessionId: null, messages: [] }));
+  if (tab.closed) return;
+  tab.chat.sessionId = h.sessionId;
+  for (const m of h.messages) addMsg(tab, m.role === 'user' ? 'user' : 'bot', m.content);
+  if (h.messages.length) return;
+  if (tab.autoExplain) ask(tab, '');
+  else {
+    const b = el('button', { type: 'button', className: 'explain-btn', textContent: '讲解这篇论文' });
+    b.onclick = () => {
+      b.remove();
+      ask(tab, '');
+    };
+    tab.chatLog.append(b);
+  }
+}
+
+async function ask(tab, message) {
+  if (!tab || tab.chat.busy) return;
+  if (tab.kind === 'compare' && !tab.report) return; // the report comes first
+  tab.chat.busy = true;
+  if (message) addMsg(tab, 'user', message);
+  const bot = addMsg(tab, 'bot', '');
+  bot.textContent = message ? '思考中…' : '正在通读全文并准备讲解…';
+  const path = tab.kind === 'compare' ? '/api/compare' : '/api/chat';
+  const body = tab.kind === 'compare' ? { ids: tab.ids, sessionId: tab.chat.sessionId, message } : { id: tab.id, sessionId: tab.chat.sessionId, message };
+  const r = await streamInto(bot, tab, path, body, $('#chat-host'));
+  if (r?.sessionId) tab.chat.sessionId = r.sessionId;
+  tab.chat.busy = false;
+}
+
+async function resetChat(tab) {
+  if (tab.chat.busy) return;
+  if (tab.kind === 'compare') {
+    await api('/api/compare/reset', { ids: tab.ids });
+    tab.chat.sessionId = null;
+    tab.report = null;
+    tab.chatLog.replaceChildren();
+    runReport(tab);
+  } else {
+    await api(`/api/paper/${tab.id}/chat/reset`, {});
+    tab.chat.sessionId = null;
+    tab.chatLog.replaceChildren(summaryCard(tab));
+    ask(tab, '');
   }
 }
 
 $('#chat-form').onsubmit = (e) => {
   e.preventDefault();
   const v = $('#chat-input').value.trim();
-  if (!v) return;
+  const tab = activeTab();
+  if (!v || !tab) return;
   $('#chat-input').value = '';
-  ask(v);
+  ask(tab, v);
 };
 $('#chat-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -522,14 +803,76 @@ $('#chat-input').addEventListener('keydown', (e) => {
     $('#chat-form').requestSubmit();
   }
 });
-for (const b of document.querySelectorAll('#chat-quick [data-ask]')) b.onclick = () => ask(b.dataset.ask);
-$('#chat-reset').onclick = async () => {
-  if (!state.paper || state.chat.busy) return;
-  await api(`/api/paper/${state.paper.id}/chat/reset`, {});
-  state.chat.sessionId = null;
-  $('#chat-log').replaceChildren(summaryCard());
-  ask('');
-};
+
+// ---- comparison tabs --------------------------------------------------------------
+
+function openCompare(ids) {
+  ids = ids.slice(0, MAX_COMPARE);
+  if (ids.length < 2) return;
+  const key = `c:${[...ids].sort().join('|')}`;
+  let tab = state.tabs.find((t) => t.key === key);
+  if (!tab) {
+    tab = addTab({
+      key,
+      kind: 'compare',
+      ids,
+      title: `对比 ${ids.length} 篇`,
+      view: el('div', { className: 'compare-view' }),
+      chatLog: el('div', { className: 'chat-log' }),
+      chat: { sessionId: null, busy: false },
+    });
+    // One tab per paper, loaded only when first shown and without an automatic explanation.
+    for (const id of ids) if (!state.tabs.some((t) => t.key === `p:${id}`)) newPaperTab(id, { autoExplain: false });
+  }
+  activate(key);
+  selectSide('chat');
+}
+
+function compareHeader(tab) {
+  const list = el('ol', { className: 'cmp-papers' });
+  tab.ids.forEach((id, k) => {
+    const c = cardOf(id) ?? { title: id };
+    const b = el('button', { type: 'button', className: 'cmp-paper' },
+      el('span', { className: 'cmp-label', textContent: LABELS[k] }),
+      el('span', { className: 'cmp-title', textContent: c.title }),
+      el('span', { className: 'cmp-meta', textContent: metaLine(c) }),
+    );
+    b.title = '打开这篇论文';
+    b.onclick = () => openPaper(id, { autoExplain: false, focusChat: false });
+    list.append(el('li', {}, b));
+  });
+  return list;
+}
+
+async function loadCompare(tab) {
+  tab.started = true;
+  tab.reportNode = el('article', { className: 'msg bot report' });
+  tab.view.replaceChildren(el('div', { className: 'cmp-inner' }, compareHeader(tab), tab.reportNode));
+  const h = await api(`/api/compare?ids=${tab.ids.map(encodeURIComponent).join(',')}`).catch(() => ({ sessionId: null, messages: [] }));
+  if (tab.closed) return;
+  tab.chat.sessionId = h.sessionId;
+  const [first, report, ...rest] = h.messages;
+  if (report) {
+    tab.report = report.content;
+    renderMd(tab.reportNode, report.content, tab);
+    for (const m of rest) addMsg(tab, m.role === 'user' ? 'user' : 'bot', m.content);
+    if (!rest.length) tab.chatLog.append(el('p', { className: 'note', textContent: '对比报告在右边。可以在这里接着追问。' }));
+  } else runReport(tab);
+}
+
+async function runReport(tab) {
+  tab.chat.busy = true;
+  tab.reportNode.classList.remove('err');
+  tab.reportNode.textContent = `正在通读 ${tab.ids.length} 篇论文的全文并整理对比，通常需要一两分钟…`;
+  tab.chatLog.replaceChildren(el('p', { className: 'note', textContent: '对比报告生成后可以在这里追问。' }));
+  const r = await streamInto(tab.reportNode, tab, '/api/compare', { ids: tab.ids }, tab.view);
+  if (r?.sessionId) {
+    tab.chat.sessionId = r.sessionId;
+    tab.report = r.text;
+    tab.chatLog.replaceChildren(el('p', { className: 'note', textContent: '对比报告在右边。可以在这里接着追问。' }));
+  }
+  tab.chat.busy = false;
+}
 
 // ---- selection translation -------------------------------------------------------
 
@@ -557,7 +900,8 @@ $('#pop-go').onclick = async () => {
   $('#pop-go').hidden = true;
   $('#pop-out').textContent = '翻译中…';
   try {
-    const { zh } = await api('/api/translate', { text: pop.dataset.text, id: state.paper?.id });
+    const tab = activeTab();
+    const { zh } = await api('/api/translate', { text: pop.dataset.text, id: tab?.kind === 'paper' ? tab.id : undefined });
     $('#pop-out').textContent = zh;
   } catch (e) {
     $('#pop-out').textContent = `翻译失败：${e.message}`;
@@ -565,11 +909,28 @@ $('#pop-go').onclick = async () => {
 };
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') pop.hidden = true;
+  // Ctrl+W closes the current tab, like a browser.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w' && state.active) {
+    e.preventDefault();
+    closeTab(state.active);
+  }
 });
+
+// ---- push channel: `pv open "..."` runs a search in this window ------------------
+
+function listen() {
+  const es = new EventSource('/api/events');
+  es.addEventListener('find', (e) => {
+    const { q } = JSON.parse(e.data);
+    $('#q').value = q;
+    find(q);
+  });
+}
 
 // ---- start --------------------------------------------------------------------
 
 state.papers = await api('/api/papers');
+renderSelBar();
 const params = new URLSearchParams(location.search);
 if (params.get('q')) {
   $('#q').value = params.get('q');
@@ -577,5 +938,6 @@ if (params.get('q')) {
 } else {
   renderList(state.papers, `库里共 ${state.papers.length} 篇，最近添加的在前`);
 }
-if (params.get('id')) openPaper(params.get('id')).catch(() => {});
+if (params.get('id') && cardOf(params.get('id'))) openPaper(params.get('id'), { autoExplain: false });
+listen();
 $('#q').focus();

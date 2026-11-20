@@ -98,3 +98,50 @@ test('server only accepts same-origin requests on its own host', () => {
 test('generated VBS scripts are pure ASCII', () => {
   for (const s of [launcherVbs(), autostartVbs()]) assert.ok(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(s));
 });
+
+test('hotkey strings parse to RegisterHotKey modifiers and key codes', async () => {
+  const { parseHotkey } = await import('../lib/desktop.mjs');
+  assert.deepEqual(parseHotkey('Ctrl+Alt+P'), { mods: 3, vk: 0x50 });
+  assert.deepEqual(parseHotkey('win+shift+f2'), { mods: 12, vk: 0x71 });
+  assert.throws(() => parseHotkey('P'));
+  assert.throws(() => parseHotkey('Ctrl+Alt+PageDown'));
+});
+
+test('comparisons are stored per set of papers, regardless of order', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pv-cmp-'));
+  process.env.PAPER_VAULT_DIR = dir;
+  const { loadCompare, saveCompare, compareKey } = await import('../lib/reader.mjs');
+  assert.equal(compareKey(['b', 'a']), compareKey(['a', 'b']));
+  saveCompare(['x', 'y'], { sessionId: 's1', messages: [{ role: 'assistant', content: 'r' }] });
+  assert.equal(loadCompare(['y', 'x']).sessionId, 's1');
+  assert.equal(loadCompare(['x', 'z']).sessionId, null);
+  delete process.env.PAPER_VAULT_DIR;
+});
+
+test('PDF extraction off the main thread matches the direct result', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { extractTextOff } = await import('../lib/pdfpool.mjs');
+  const { extractText } = await import('../lib/pdftext.mjs');
+  const os = await import('node:os');
+  // A minimal one-page PDF (pdfjs rebuilds the missing xref table).
+  const sample = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pv-pdf-')), 'tiny.pdf');
+  fs.writeFileSync(sample, [
+    '%PDF-1.4',
+    '1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj',
+    '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj',
+    '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj',
+    '4 0 obj<</Length 50>>stream',
+    'BT /F1 12 Tf 20 100 Td (Hello paper vault) Tj ET',
+    'endstream endobj',
+    '5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj',
+    'trailer<</Root 1 0 R>>',
+    '%%EOF',
+  ].join('\n'));
+  const off = await extractTextOff(sample);
+  assert.match(off.text, /Hello paper vault/);
+  assert.deepEqual(off, await extractText(sample));
+});

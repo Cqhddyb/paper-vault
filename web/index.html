@@ -21,24 +21,28 @@
   <section id="pane-list" class="pane" role="tabpanel">
     <p id="list-note" class="note"></p>
     <ol id="results"></ol>
+    <div id="sel-bar" hidden>
+      <span id="sel-count"></span>
+      <button type="button" id="sel-compare">对比方法</button>
+      <button type="button" id="sel-clear" class="quiet">清空</button>
+    </div>
   </section>
   <section id="pane-chat" class="pane" role="tabpanel" hidden>
-    <div id="chat-log"></div>
-    <div id="chat-quick">
-      <button type="button" data-ask="核心方法具体是怎么做的？请把关键模块和训练目标讲细一点。">方法细节</button>
-      <button type="button" data-ask="实验部分最重要的结论是什么？有哪些数字值得记住？">关键结果</button>
-      <button type="button" data-ask="这篇论文和我库里哪些论文最相关？分别是什么关系？">相关论文</button>
-      <button type="button" id="chat-reset" title="清空对话，重新讲解">重新讲解</button>
-    </div>
+    <div id="chat-host"></div>
+    <div id="chat-quick"></div>
     <form id="chat-form">
       <label for="chat-input" class="sr">追问</label>
-      <textarea id="chat-input" rows="2" placeholder="追问这篇论文…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <textarea id="chat-input" rows="2" placeholder="追问…（Enter 发送，Shift+Enter 换行）"></textarea>
       <button type="submit">发送</button>
     </form>
   </section>
 </aside>
 
 <main id="reader">
+  <div id="strip">
+    <div id="doc-tabs" role="tablist" aria-label="打开的论文"></div>
+    <button type="button" id="hide-btn" title="隐藏窗口（Ctrl+Alt+P 再呼出）">隐藏</button>
+  </div>
   <header id="bar" hidden>
     <div id="paper-head">
       <h1 id="paper-title"></h1>
@@ -57,10 +61,10 @@
       <span id="page-ind" aria-live="polite"></span>
     </div>
   </header>
-  <div id="pages" tabindex="-1"></div>
+  <div id="views"></div>
   <div id="empty">
     <p class="big">在左边描述一篇论文，或从列表里选一篇。</p>
-    <p class="hint">打开后左边讲解，右边是原文和中文对照。在原文里选中一段文字可以单独翻译。</p>
+    <p class="hint">打开后左边讲解，右边是原文和中文对照，在原文里选中文字可以单独翻译。勾选 2 到 5 篇可以对比它们的方法。</p>
   </div>
 </main>
 

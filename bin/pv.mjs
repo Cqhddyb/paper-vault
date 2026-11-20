@@ -183,9 +183,19 @@ const commands = {
     // One background process for everything: the assistant web server plus
     // the inbox watcher (the watcher exits quietly if another one holds the lock).
     const { startServer } = await import('../lib/server.mjs');
+    const desktop = await import('../lib/desktop.mjs');
+    const d = ensureLayout(dirs().root);
+    const log = (msg) => {
+      const line = `[${new Date().toISOString()}] ${msg}`;
+      console.log(line);
+      fs.appendFileSync(path.join(d.staging, 'watch.log'), line + '\n');
+    };
+    // Port first: a second `serve` must not start a second hotkey helper.
+    let send = null;
+    const windowControl = { send: (cmd) => (send ? send(cmd) : false), open: desktop.openWindow };
     try {
-      const { url } = await startServer();
-      console.log(`论文小助手: ${url}`);
+      const { url } = await startServer({ windowControl });
+      log(`论文小助手: ${url}`);
     } catch (e) {
       if (e.code === 'EADDRINUSE') {
         console.log('论文小助手已在运行。');
@@ -193,17 +203,22 @@ const commands = {
       }
       throw e;
     }
+    send = desktop.startWindowHelper({ log });
     const { watch } = await import('../lib/watch.mjs');
     await watch();
   },
 
   async open(args) {
-    const { ensureServer, openWindow, baseUrl } = await import('../lib/desktop.mjs');
+    const { ensureServer, baseUrl } = await import('../lib/desktop.mjs');
     if (!(await ensureServer())) throw new UserError('论文小助手没能启动，运行 node pv.mjs serve 看报错');
     const q = args.join(' ').trim();
-    const url = baseUrl() + (q ? `?q=${encodeURIComponent(q)}` : '');
-    openWindow(url);
-    console.log(url);
+    // Reuse the open window when there is one (the search runs there); otherwise a new one opens.
+    const r = await fetch(baseUrl() + 'api/window', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-pv': '1' },
+      body: JSON.stringify({ action: 'show', ...(q ? { q } : {}) }),
+    }).then((x) => x.json());
+    console.log(JSON.stringify(r));
   },
 
   async assistant(args) {
@@ -213,7 +228,7 @@ const commands = {
       const hotkey = opt(args, '--hotkey', undefined);
       if (hotkey) writeConfig({ ...readConfig(), hotkey });
       const r = d.installAssistant(hotkey);
-      console.log(`已创建开始菜单快捷方式: ${r.shortcut}\n快捷键: ${r.hotkey}（按下即可调出论文小助手）\n启动脚本: ${r.launcher}`);
+      console.log(`已创建开始菜单快捷方式: ${r.shortcut}\n快捷键: ${r.hotkey}（由后台服务注册：按一下呼出，窗口在前台时再按一下隐藏；改了快捷键要重启服务）\n启动脚本: ${r.launcher}`);
     } else if (sub === 'remove') {
       d.removeAssistant();
       console.log('已删除快捷方式和启动脚本。');
