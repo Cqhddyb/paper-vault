@@ -193,9 +193,11 @@ const commands = {
     // Port first: a second `serve` must not start a second hotkey helper.
     let send = null;
     const windowControl = { send: (cmd) => (send ? send(cmd) : false), open: desktop.openWindow };
+    let broadcast;
     try {
-      const { url } = await startServer({ windowControl });
-      log(`论文小助手: ${url}`);
+      const started = await startServer({ windowControl });
+      broadcast = started.broadcast;
+      log(`论文小助手: ${started.url}`);
     } catch (e) {
       if (e.code === 'EADDRINUSE') {
         console.log('论文小助手已在运行。');
@@ -205,7 +207,7 @@ const commands = {
     }
     send = desktop.startWindowHelper({ log });
     const { watch } = await import('../lib/watch.mjs');
-    await watch();
+    await watch({ onEvent: (e) => broadcast('library', e) });
   },
 
   async open(args) {

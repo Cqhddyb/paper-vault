@@ -75,6 +75,12 @@ frontmatter 字段：`title authors year venue arxiv doi url tags models dataset
 - **呼出与隐藏**：按 **Ctrl+Alt+P** 呼出窗口；窗口在最前面时再按一次就隐藏（任务栏上也不留），键盘焦点回到你原来的窗口。窗口右上角的“隐藏”按钮效果相同。快捷键由 `pv serve` 启动的一个小助手进程注册（`lib/winctl.ps1`），服务退出它也跟着退出；改了 `hotkey` 配置要重启服务。
 - **标签页**：每篇打开的论文是一个标签页，各自保留阅读位置、译文和讲解；点 × 或按 Ctrl+W 关闭。点列表里已经打开的论文会直接切过去。
 - **方法对比**：在列表里勾选 2 到 5 篇，点“对比方法”。会打开一个对比标签页（每篇论文一个字母 A–E、一份对比报告：每篇一句话、对比总表、思路异同、能否直接比较结果、优缺点与适用场景、组合思路），并为每篇论文各开一个标签页（切过去时才加载，不会自动讲解）。报告里的“A 第 4 页”可以点，会跳到那篇论文的那一页。左边“对比追问”可以接着问。报告保存在论文库的 `.staging/compare/`，同一组论文（不论勾选顺序）再次对比会直接显示。
+- **找类似做法**：在原文（或译文）里选中一段描述某项技术的文字，点“找类似做法”，可以改一下问题（默认“类似的做法还有谁做了，不要求完全一样”），小助手会联网搜集采用相同或相近思路的论文、博客、报道、帖子和代码，结果在一个新标签页里：
+  - 报告：把这类做法抽象成一个技术思路，按变体分组讲每种变体改了什么、优缺点，最后告诉你什么场景选哪种、先读哪几篇；
+  - 条目卡片：每条标出类型、所属变体、一句话说明。arXiv 论文会去 Semantic Scholar / arXiv 核对标题、作者、年份（查不到的会标“可能有误”）；库里已有的直接“打开”；其余可以“下载到论文库”，下载后自动总结入库，按钮会依次变成“正在总结入库…”“已入库，打开”；
+  - 左边可以接着问（“再找最新的”“找开源代码”“帮我选”），新找到的条目会高亮加进列表。
+  - 结果保存在论文库的 `.staging/variants/`，同一段文字问同一个问题会直接显示上次的结果，点“重新搜索”才会重新联网。一次搜索约 1 分钟、$0.25-0.35。
+  - 这是唯一一个开了工具的 Claude 调用，而且只开了 WebSearch 和 WebFetch（不能读写文件、不能执行命令）；下载只接受 arXiv 或公网 https 的 PDF 链接，内容必须真是 PDF。
 - **在已开的窗口里检索**：`pv open "描述"`（以及 `/paper-vault:open`）会把检索发到已经打开的窗口里，不再另开一个。
 - **找论文**：先用关键词检索立刻给出初步列表，再让 Claude（默认 Haiku）读整个论文目录、按你的描述细筛并给出理由。能确定就直接打开第一篇；如果细筛期间你已经点开了别的论文，就不会再替你打开。
 - **讲解**：打开论文时自动讲解一次（默认 Sonnet，把总结和全文一起给它），之后可以追问；回答里的“第 N 页”可以点击跳转。对话保存在 `.reader/chat.json`，再次打开不会重新讲解；点“重新讲解”才会重来。
@@ -94,12 +100,13 @@ frontmatter 字段：`title authors year venue arxiv doi url tags models dataset
   "chatModel": "sonnet",
   "translateModel": "haiku",
   "findModel": "haiku",
+  "searchModel": "sonnet",
   "port": 7788,
   "hotkey": "Ctrl+Alt+P"
 }
 ```
 
-`model`（入库总结）、`chatModel`（讲解）、`translateModel`（翻译）、`findModel`（找论文）都可以是 `sonnet`、`opus`、`haiku` 或完整模型 ID；除 `library` 外都可省略。改了 `port` 或 `hotkey` 要重新运行 `pv assistant install`。临时换库可以设环境变量 `PAPER_VAULT_DIR`。
+`model`（入库总结）、`chatModel`（讲解、对比）、`translateModel`（翻译）、`findModel`（找论文）、`searchModel`（找类似做法）都可以是 `sonnet`、`opus`、`haiku` 或完整模型 ID；除 `library` 外都可省略。改了 `port` 或 `hotkey` 要重新运行 `pv assistant install`。临时换库可以设环境变量 `PAPER_VAULT_DIR`。
 
 ## CLI
 

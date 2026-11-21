@@ -186,7 +186,7 @@ const activeTab = () => state.tabs.find((t) => t.key === state.active) ?? null;
 function addTab(tab) {
   tab.view.hidden = true;
   $('#views').append(tab.view);
-  tab.button = el('div', { className: `doc-tab${tab.kind === 'compare' ? ' cmp' : ''}`, role: 'tab', tabIndex: 0 });
+  tab.button = el('div', { className: `doc-tab${{ compare: ' cmp', variants: ' var' }[tab.kind] ?? ''}`, role: 'tab', tabIndex: 0 });
   tab.label = el('span', { className: 'dt-label' });
   const close = el('button', { type: 'button', className: 'dt-close', textContent: '×', title: '关闭' });
   close.setAttribute('aria-label', '关闭这个标签页');
@@ -227,7 +227,7 @@ function activate(key) {
   $('#empty').hidden = true;
   $('#bar').hidden = false;
   $('#tab-chat').disabled = false;
-  $('#tab-chat').textContent = tab.kind === 'compare' ? '对比追问' : '讲解';
+  $('#tab-chat').textContent = CHAT_TAB_LABEL[tab.kind];
   $('#chat-host').replaceChildren(tab.chatLog);
   renderQuick(tab);
   updateBar();
@@ -239,7 +239,7 @@ function activate(key) {
       relayoutTab(tab);
       tab.view.scrollTop = tab.scrollTop ?? 0;
     }
-  } else if (!tab.started) loadCompare(tab);
+  } else if (!tab.started) (tab.kind === 'variants' ? loadVariants(tab) : loadCompare(tab));
 }
 
 function closeTab(key) {
@@ -282,6 +282,10 @@ function updateBar() {
     $('#paper-sub').textContent = metaLine(info);
     document.title = `${info.title ?? tab.title} · Paper Vault`;
     updatePageInd();
+  } else if (tab.kind === 'variants') {
+    $('#paper-title').textContent = '类似做法';
+    $('#paper-sub').textContent = `出自 ${cardOf(tab.paperId)?.title ?? tab.paperId}${tab.page ? ` 第 ${tab.page} 页` : ''}：${tab.passage.slice(0, 120)}`;
+    document.title = '类似做法 · Paper Vault';
   } else {
     $('#paper-title').textContent = `方法对比：${tab.ids.length} 篇`;
     $('#paper-sub').textContent = tab.ids.map((id, k) => `${LABELS[k]} ${cardOf(id)?.title ?? id}`).join('；');
@@ -645,6 +649,8 @@ function linkPages(root, tab) {
           if (!id) return;
           const pt = openPaper(id, { autoExplain: false, focusChat: false });
           goPage(pt, Number(m[2]));
+        } else if (tab.kind === 'variants') {
+          goPage(openPaper(tab.paperId, { autoExplain: false, focusChat: false }), Number(m[1]));
         } else goPage(tab, Number(m[1]));
       };
       frag.append(a);
@@ -666,26 +672,30 @@ function renderMd(node, md, tab) {
   linkPages(node, tab);
 }
 
+// The variants search ends its answer with a ```json item list: never show that part.
+const hideJson = (s) => s.replace(/```json[\s\S]*$/, '').trimEnd();
+
 /** Stream an answer into `node`, re-rendering markdown at most once per frame. */
-async function streamInto(node, tab, path, body, scroller) {
+async function streamInto(node, tab, path, body, scroller, { onEvent } = {}) {
   let text = '';
   let raf = 0;
   tab.abort = new AbortController();
   try {
     for await (const { event, data } of sseStream(path, body, tab.abort.signal)) {
       if (tab.closed) return null;
+      onEvent?.(event, data);
       if (event === 'delta') {
         text += data;
         if (!raf)
           raf = requestAnimationFrame(() => {
             raf = 0;
             const stick = scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
-            renderMd(node, text, tab);
+            renderMd(node, hideJson(text), tab);
             if (stick) scroller.scrollTop = scroller.scrollHeight;
           });
       } else if (event === 'done') {
         cancelAnimationFrame(raf);
-        renderMd(node, data.text || text, tab);
+        renderMd(node, hideJson(data.text ?? data.report ?? text), tab);
         if (data.cost) node.append(el('span', { className: 'cost', textContent: `本轮约 $${data.cost.toFixed(3)}` }));
         return data;
       } else if (event === 'error') throw new Error(data.message);
@@ -712,6 +722,17 @@ const QUICK = {
     ['组合思路', '如果把这几篇的方法组合起来，最有希望的方案是什么？请给出具体设计和要验证的实验。'],
     ['共同基准', '这几篇有没有在相同的基准或任务上评测？把能直接比较的数字整理成一张表。'],
   ],
+  variants: [
+    ['再找最新的', '再搜一下最近一年的新工作（论文、博客、帖子都行），补充前面没列到的。'],
+    ['找开源代码', '这些变体里哪些有开源代码或可直接用的实现？再搜一下补充代码库链接。'],
+    ['帮我选', '如果要在原文论文的设定下改进这一步，你最推荐哪种变体？给出理由、实现要点和需要验证的实验。'],
+  ],
+};
+const CHAT_TAB_LABEL = { paper: '讲解', compare: '对比追问', variants: '追问' };
+const PLACEHOLDER = {
+  paper: '追问这篇论文…（Enter 发送，Shift+Enter 换行）',
+  compare: '追问这几篇论文的对比…（Enter 发送）',
+  variants: '接着问，比如“只要用在灵巧手上的”…（Enter 发送）',
 };
 
 function renderQuick(tab) {
@@ -723,10 +744,10 @@ function renderQuick(tab) {
       return b;
     }),
   );
-  const reset = el('button', { type: 'button', textContent: tab.kind === 'compare' ? '重新对比' : '重新讲解', title: '清空对话重新生成' });
+  const reset = el('button', { type: 'button', textContent: { compare: '重新对比', variants: '重新搜索', paper: '重新讲解' }[tab.kind], title: '清空重新生成' });
   reset.onclick = () => resetChat(tab);
   host.append(reset);
-  $('#chat-input').placeholder = tab.kind === 'compare' ? '追问这几篇论文的对比…（Enter 发送）' : '追问这篇论文…（Enter 发送，Shift+Enter 换行）';
+  $('#chat-input').placeholder = PLACEHOLDER[tab.kind];
 }
 
 function addMsg(tab, role, text) {
@@ -761,21 +782,36 @@ async function loadChat(tab) {
 
 async function ask(tab, message) {
   if (!tab || tab.chat.busy) return;
-  if (tab.kind === 'compare' && !tab.report) return; // the report comes first
+  if (tab.kind !== 'paper' && !tab.report) return; // the report comes first
+  if (tab.kind === 'variants' && !message) return;
   tab.chat.busy = true;
   if (message) addMsg(tab, 'user', message);
   const bot = addMsg(tab, 'bot', '');
-  bot.textContent = message ? '思考中…' : '正在通读全文并准备讲解…';
-  const path = tab.kind === 'compare' ? '/api/compare' : '/api/chat';
-  const body = tab.kind === 'compare' ? { ids: tab.ids, sessionId: tab.chat.sessionId, message } : { id: tab.id, sessionId: tab.chat.sessionId, message };
+  bot.textContent = message ? (tab.kind === 'variants' ? '正在联网搜索…' : '思考中…') : '正在通读全文并准备讲解…';
+  const path = { compare: '/api/compare', variants: '/api/variants', paper: '/api/chat' }[tab.kind];
+  const body = {
+    compare: { ids: tab.ids, sessionId: tab.chat.sessionId, message },
+    variants: { key: tab.vkey, id: tab.paperId, message },
+    paper: { id: tab.id, sessionId: tab.chat.sessionId, message },
+  }[tab.kind];
   const r = await streamInto(bot, tab, path, body, $('#chat-host'));
   if (r?.sessionId) tab.chat.sessionId = r.sessionId;
+  if (tab.kind === 'variants' && r?.items) {
+    const had = new Set(tab.items.map(itemKey));
+    const fresh = new Set(r.items.map(itemKey).filter((k) => !had.has(k)));
+    renderItems(tab, r.items, fresh);
+    bot.append(el('span', { className: 'cost', textContent: fresh.size ? `新增 ${fresh.size} 条，已加到右边列表（高亮的就是）` : '没有新条目' }));
+  }
   tab.chat.busy = false;
 }
 
 async function resetChat(tab) {
   if (tab.chat.busy) return;
-  if (tab.kind === 'compare') {
+  if (tab.kind === 'variants') {
+    tab.report = null;
+    tab.chatLog.replaceChildren();
+    runVariants(tab, { refresh: true });
+  } else if (tab.kind === 'compare') {
     await api('/api/compare/reset', { ids: tab.ids });
     tab.chat.sessionId = null;
     tab.report = null;
@@ -881,30 +917,218 @@ async function runReport(tab) {
   tab.chat.busy = false;
 }
 
-// ---- selection translation -------------------------------------------------------
+// ---- "who else does something like this?" tabs ----------------------------------
+
+const KIND_LABEL = { paper: '论文', blog: '博客', news: '报道', post: '帖子', code: '代码', video: '视频' };
+const itemKey = (it) => it.arxiv || it.url || it.title;
+const pendingDownloads = new Map(); // inbox file name -> [{tab, key}]
+
+function openVariants({ paperId, passage, page, question }) {
+  const tab = addTab({
+    key: `v:${Date.now()}`,
+    kind: 'variants',
+    paperId,
+    passage,
+    page,
+    question,
+    title: `类似做法：${passage.replace(/\s+/g, ' ').slice(0, 16)}…`,
+    view: el('div', { className: 'compare-view' }),
+    chatLog: el('div', { className: 'chat-log' }),
+    chat: { sessionId: null, busy: false },
+    items: [],
+  });
+  activate(tab.key);
+  selectSide('chat');
+}
+
+function variantsHeader(tab) {
+  const src = el('button', { type: 'button', className: 'v-src', textContent: `出自《${cardOf(tab.paperId)?.title ?? tab.paperId}》${tab.page ? ` 第 ${tab.page} 页` : ''}` });
+  src.onclick = () => {
+    const pt = openPaper(tab.paperId, { autoExplain: false, focusChat: false });
+    if (tab.page) goPage(pt, tab.page);
+  };
+  return el('header', { className: 'v-head' },
+    el('blockquote', { className: 'v-quote', textContent: tab.passage }),
+    src,
+    el('p', { className: 'v-question', textContent: `问：${tab.question}` }),
+  );
+}
+
+async function loadVariants(tab) {
+  tab.started = true;
+  tab.reportNode = el('article', { className: 'msg bot report' });
+  tab.itemsNode = el('section', { className: 'v-items' });
+  tab.view.replaceChildren(el('div', { className: 'cmp-inner' }, variantsHeader(tab), tab.itemsNode, tab.reportNode));
+  runVariants(tab);
+}
+
+async function runVariants(tab, { refresh = false } = {}) {
+  tab.chat.busy = true;
+  tab.reportNode.classList.remove('err');
+  tab.reportNode.textContent = '正在联网搜集相关工作，并核对 arXiv 信息，通常需要 1-2 分钟…';
+  if (!refresh) tab.itemsNode.replaceChildren();
+  tab.chatLog.replaceChildren(el('p', { className: 'note', textContent: '搜索结果出来后可以在这里接着问，比如让它再找某一类变体。' }));
+  const body = tab.vkey ? { key: tab.vkey, id: tab.paperId, refresh } : { id: tab.paperId, passage: tab.passage, page: tab.page, question: tab.question, refresh };
+  const r = await streamInto(tab.reportNode, tab, '/api/variants', body, tab.view, {
+    onEvent: (ev, data) => {
+      if (ev === 'key') tab.vkey = data.key;
+    },
+  });
+  if (r) {
+    tab.report = r.report;
+    tab.chat.sessionId = r.sessionId;
+    renderItems(tab, r.items ?? []);
+    tab.chatLog.replaceChildren(el('p', { className: 'note', textContent: r.cached ? '这是之前搜过的结果。点“重新搜索”会重新联网搜集。' : '结果在右边。可以在这里接着问。' }));
+    for (const m of (r.messages ?? []).slice(2)) addMsg(tab, m.role === 'user' ? 'user' : 'bot', hideJson(m.content));
+  }
+  tab.chat.busy = false;
+}
+
+function renderItems(tab, items, fresh = new Set()) {
+  tab.items = items;
+  const grid = el('div', { className: 'v-grid' });
+  for (const it of items) grid.append(itemCard(tab, it, fresh.has(itemKey(it))));
+  const papers = items.filter((i) => i.kind === 'paper').length;
+  tab.itemsNode.replaceChildren(
+    el('h2', { className: 'v-h', textContent: `搜集到 ${items.length} 条（论文 ${papers} 篇）` }),
+    grid,
+  );
+}
+
+function itemCard(tab, it, isNew) {
+  const card = el('article', { className: `v-card${isNew ? ' new' : ''}` });
+  const top = el('div', { className: 'v-top' }, el('span', { className: `v-kind k-${it.kind}`, textContent: KIND_LABEL[it.kind] ?? it.kind }));
+  if (it.variant) top.append(el('span', { className: 'v-variant', textContent: it.variant }));
+  const title = it.url ? el('a', { className: 'v-title', href: it.url, target: '_blank', rel: 'noopener noreferrer', textContent: it.title || it.url }) : el('span', { className: 'v-title', textContent: it.title });
+  const meta = [it.year, (it.authors ?? []).slice(0, 3).join(', ') + ((it.authors ?? []).length > 3 ? ' 等' : '')].filter(Boolean).join('，');
+  card.append(top, title);
+  if (meta) card.append(el('p', { className: 'v-meta', textContent: meta }));
+  if (it.verified === true) card.append(el('p', { className: 'v-ok', textContent: `arXiv ${it.arxiv} 已核实` }));
+  if (it.verified === false) card.append(el('p', { className: 'v-bad', textContent: `arXiv 上查不到 ${it.arxiv}，这条可能有误` }));
+  if (it.note) card.append(el('p', { className: 'v-note', textContent: it.note }));
+  const actions = el('div', { className: 'v-actions' });
+  if (it.libraryId) {
+    const b = el('button', { type: 'button', textContent: '已在库里，打开' });
+    b.onclick = () => openPaper(it.libraryId, { focusChat: false });
+    actions.append(b);
+  } else if (it.downloadable) {
+    const b = el('button', { type: 'button', className: 'primary', textContent: '下载到论文库' });
+    b.onclick = () => download(tab, it, b);
+    actions.append(b);
+  }
+  if (actions.childNodes.length) card.append(actions);
+  return card;
+}
+
+async function download(tab, it, btn) {
+  btn.disabled = true;
+  btn.textContent = '下载中…';
+  try {
+    const r = await api('/api/download', { arxiv: it.arxiv || undefined, url: it.arxiv ? undefined : it.url, title: it.title });
+    if (r.status === 'exists') {
+      it.libraryId = r.id;
+      btn.disabled = false;
+      btn.className = '';
+      btn.textContent = '已在库里，打开';
+      btn.onclick = () => openPaper(r.id, { focusChat: false });
+      return;
+    }
+    btn.textContent = '已下载，等待入库…';
+    const list = pendingDownloads.get(r.file) ?? [];
+    list.push({ tab, it, btn });
+    pendingDownloads.set(r.file, list);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '重试下载';
+    btn.title = e.message;
+    btn.after(el('span', { className: 'v-err', textContent: e.message }));
+  }
+}
+
+/** The inbox watcher reports progress; update matching download buttons. */
+async function onLibraryEvent(e) {
+  const waiting = pendingDownloads.get(e.file);
+  if (e.type === 'added' || e.type === 'duplicate') {
+    state.papers = await api('/api/papers').catch(() => state.papers);
+    if (!$('#q').value.trim() && !state.listed.some((p) => p.reason)) renderList(state.papers, `库里共 ${state.papers.length} 篇，最近添加的在前`);
+  }
+  if (!waiting) return;
+  for (const { it, btn } of waiting) {
+    if (e.type === 'start') btn.textContent = '正在总结入库…';
+    else if (e.type === 'added' || e.type === 'duplicate') {
+      it.libraryId = e.id;
+      btn.disabled = false;
+      btn.className = '';
+      btn.textContent = e.type === 'added' ? '已入库，打开' : '库里已有，打开';
+      btn.onclick = () => openPaper(e.id, { focusChat: false });
+    } else if (e.type === 'failed') {
+      btn.textContent = '入库失败';
+      btn.title = e.error ?? '';
+    }
+  }
+  if (e.type !== 'start') pendingDownloads.delete(e.file);
+}
+
+// ---- selection: translate, or find similar approaches ---------------------------
 
 const pop = $('#pop');
+const DEFAULT_Q = '类似的做法还有谁做了？不要求完全一样，论文、博客、报道、帖子都可以。我想看看这一类做法有哪些变体，判断哪种最合适。';
+
+function selectionSource(sel) {
+  const node = sel?.anchorNode?.parentElement;
+  const inPage = node?.closest('.textLayer');
+  const inZh = node?.closest('.zh .p');
+  if (!inPage && !inZh) return null;
+  const tab = activeTab();
+  if (tab?.kind !== 'paper') return null;
+  return { tab, page: Number(node.closest('.row')?.dataset.page) || null, original: !!inPage };
+}
+
 document.addEventListener('mouseup', (e) => {
   if (pop.contains(e.target)) return;
   setTimeout(() => {
     const sel = window.getSelection();
     const text = sel?.toString().trim();
-    const inPage = sel?.anchorNode && sel.anchorNode.parentElement?.closest('.textLayer');
-    if (!text || text.length < 2 || !inPage) {
+    const src = text && text.length >= 2 ? selectionSource(sel) : null;
+    if (!src) {
       pop.hidden = true;
       return;
     }
     const rect = sel.getRangeAt(0).getBoundingClientRect();
     pop.dataset.text = text;
+    pop.source = src;
     $('#pop-out').textContent = '';
-    $('#pop-go').hidden = false;
+    $('#pop-actions').hidden = false;
+    $('#pop-go').hidden = !src.original; // translating Chinese makes no sense
+    $('#pop-ask').hidden = true;
     pop.hidden = false;
-    pop.style.left = `${Math.min(rect.left, window.innerWidth - 440)}px`;
-    pop.style.top = `${Math.min(rect.bottom + 6, window.innerHeight - 80)}px`;
+    pop.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 440))}px`;
+    pop.style.top = `${Math.min(rect.bottom + 6, window.innerHeight - 200)}px`;
   });
 });
+$('#pop-similar').onclick = () => {
+  $('#pop-actions').hidden = true;
+  $('#pop-out').textContent = '';
+  $('#pop-ask').hidden = false;
+  $('#pop-q').value = DEFAULT_Q;
+  $('#pop-q').focus();
+  $('#pop-q').select();
+};
+$('#pop-ask').onsubmit = (e) => {
+  e.preventDefault();
+  const src = pop.source;
+  if (!src) return;
+  pop.hidden = true;
+  openVariants({ paperId: src.tab.id, passage: pop.dataset.text, page: src.page, question: $('#pop-q').value.trim() || DEFAULT_Q });
+};
+$('#pop-q').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    $('#pop-ask').requestSubmit();
+  }
+});
 $('#pop-go').onclick = async () => {
-  $('#pop-go').hidden = true;
+  $('#pop-actions').hidden = true;
   $('#pop-out').textContent = '翻译中…';
   try {
     const tab = activeTab();
@@ -932,6 +1156,7 @@ function listen() {
     $('#q').value = q;
     find(q);
   });
+  es.addEventListener('library', (e) => onLibraryEvent(JSON.parse(e.data)));
 }
 
 // ---- start --------------------------------------------------------------------

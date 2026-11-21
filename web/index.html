@@ -68,8 +68,19 @@
   </div>
 </main>
 
-<div id="pop" hidden role="dialog" aria-label="选中文字的翻译">
-  <button id="pop-go" type="button">翻译选中文字</button>
+<div id="pop" hidden role="dialog" aria-label="对选中文字的操作">
+  <div id="pop-actions">
+    <button id="pop-go" type="button">翻译</button>
+    <button id="pop-similar" type="button" title="搜集采用相同或相近做法的论文、博客、帖子">找类似做法</button>
+  </div>
+  <form id="pop-ask" hidden>
+    <label for="pop-q" class="sr">想问小助手什么</label>
+    <textarea id="pop-q" rows="3"></textarea>
+    <div class="pop-row">
+      <span class="pop-hint">会联网搜索，约 1-2 分钟</span>
+      <button type="submit">开始搜索</button>
+    </div>
+  </form>
   <div id="pop-out"></div>
 </div>
 
