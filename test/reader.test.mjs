@@ -145,3 +145,21 @@ test('PDF extraction off the main thread matches the direct result', async () =>
   assert.match(off.text, /Hello paper vault/);
   assert.deepEqual(off, await extractText(sample));
 });
+
+test('a title, arXiv id or DOI in the query finds the paper directly', async () => {
+  const { directMatches } = await import('../lib/reader.mjs');
+  const P = (id, title, extra = {}) => ({ meta: { id, title, ...extra } });
+  const papers = [
+    P('a', 'SuperMimic: Scaling Humanoid Whole-Body Control with One Differentiable World Model', { arxiv: '2610.28480' }),
+    P('b', 'OpenVLA: An Open-Source Vision-Language-Action Model', { doi: '10.1000/xyz123' }),
+    P('c', 'π0.5: a Vision-Language-Action Model with Open-World Generalization'),
+  ];
+  const ids = (q) => directMatches(q, papers).map((p) => p.meta.id);
+  assert.deepEqual(ids('supermimic: scaling humanoid whole-body control with one differentiable world model'), ['a']);
+  assert.deepEqual(ids('SuperMimic Scaling Humanoid Whole-Body Control'), ['a']); // a long piece of the title
+  assert.deepEqual(ids('https://arxiv.org/abs/2610.28480v3'), ['a']);
+  assert.deepEqual(ids('doi 10.1000/XYZ123'), ['b']);
+  assert.deepEqual(ids('π0.5: a Vision-Language-Action Model with Open-World Generalization'), ['c']);
+  assert.deepEqual(ids('OpenVLA'), []); // a single word is left to ranked search
+  assert.deepEqual(ids('vision-language-action model'), ['b', 'c']); // a shared phrase lists all
+});

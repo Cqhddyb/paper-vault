@@ -149,14 +149,23 @@ async function find(q) {
   try {
     const r = await api('/api/find', { q });
     if (seq !== findSeq) return;
-    if (!r.results.length) return renderList([], '没找到符合描述的论文。换几个记得的细节试试，比如用到的模型、数据集或任务。');
+    if (!r.results.length) {
+      // Keep whatever keyword search found; only say "nothing" when both found nothing.
+      if (quick.length) return renderList(quick, '没有找到更确定的结果，下面是关键词匹配：');
+      return renderList([], '没找到符合描述的论文。换几个记得的细节试试，比如用到的模型、数据集或任务。');
+    }
     // Never override a paper the user already picked while the refinement ran.
     const autoOpen = r.confident && state.lastUserOpen < startedAt;
-    const note = r.by !== 'claude' ? '细筛失败，下面是关键词匹配结果：' : autoOpen ? '最符合的一篇已经打开，其余备选：' : `找到 ${r.results.length} 篇可能符合的，点一篇打开：`;
+    const note =
+      r.by === 'title' ? (autoOpen ? '标题匹配，已经打开：' : `有 ${r.results.length} 篇标题匹配：`)
+      : r.by !== 'claude' ? (r.error ? '细筛暂时不可用，下面是关键词匹配结果：' : '没有找到更确定的结果，下面是关键词匹配：')
+      : autoOpen ? '最符合的一篇已经打开，其余备选：'
+      : `找到 ${r.results.length} 篇可能符合的，点一篇打开：`;
     renderList(r.results, note, { reasons: true });
     if (autoOpen) openPaper(r.results[0].id, { focusChat: false });
   } catch (e) {
-    if (seq === findSeq) $('#list-note').textContent = `细筛失败（${e.message}），下面是关键词匹配结果。`;
+    if (seq !== findSeq) return;
+    $('#list-note').textContent = quick.length ? `细筛失败（${e.message}），下面是关键词匹配结果。` : `连不上后台服务（${e.message}）。稍等几秒再试；如果一直这样，重新按 Ctrl+Alt+P 或从开始菜单打开论文小助手。`;
     $('#list-note').classList.remove('busy');
   }
 }
