@@ -71,9 +71,11 @@ function renderList(items, note, { reasons = false } = {}) {
     const box = el('input', { type: 'checkbox', className: 'pick', checked: state.sel.has(p.id), title: '勾选 2 到 5 篇来对比方法' });
     box.setAttribute('aria-label', `选来对比：${p.title}`);
     box.onchange = () => toggleSel(p, box);
+    const metaEl = el('span', { className: 'r-meta', textContent: metaLine(p) });
+    if (p.format === 'markdown') metaEl.prepend(el('span', { className: 'r-badge', textContent: '网络文章' }));
     const b = el('button', { type: 'button', className: 'open' },
       el('span', { className: 'r-title', textContent: p.title || p.id }),
-      el('span', { className: 'r-meta', textContent: metaLine(p) }),
+      metaEl,
     );
     if (reasons && p.reason) b.append(el('span', { className: 'r-why', textContent: p.reason }));
     else if (p.tldr) b.append(el('span', { className: 'r-tldr', textContent: p.tldr }));
@@ -324,7 +326,7 @@ function openPaper(id, { autoExplain = true, focusChat = true } = {}) {
 
 async function loadPaper(tab) {
   tab.started = true;
-  tab.view.replaceChildren(el('p', { className: 'loading', textContent: '正在打开论文…' }));
+  tab.view.replaceChildren(el('p', { className: 'loading', textContent: '正在打开…' }));
   tab.chatLog.replaceChildren();
   try {
     const [info, layout] = await Promise.all([api(`/api/paper/${tab.id}`), api(`/api/paper/${tab.id}/layout`)]);
@@ -332,6 +334,11 @@ async function loadPaper(tab) {
     tab.info = info;
     tab.layout = layout;
     setTabTitle(tab, info.title);
+    if (info.format === 'markdown') {
+      buildArticle(tab);
+      loadChat(tab);
+      return;
+    }
     tab.task = pdfjs.getDocument({ url: `/api/paper/${tab.id}/pdf`, isEvalSupported: false });
     tab.doc = await tab.task.promise;
     if (tab.closed) return;
@@ -341,6 +348,67 @@ async function loadPaper(tab) {
     if (tab.closed) return;
     tab.started = false; // let a later activation retry
     tab.view.replaceChildren(el('p', { className: 'loading err', textContent: `打开失败：${e.message}。关闭这个标签页后可以重试。` }));
+  }
+}
+
+// ---- web articles: one row per paragraph, original | translation ----------------
+
+function buildArticle(tab) {
+  const host = tab.view;
+  host.className = `pages article mode-${state.mode}`;
+  host.style.setProperty('--az', state.zoom);
+  const info = tab.info;
+  const head = el('header', { className: 'a-head' });
+  if (info.meta?.url) {
+    head.append(el('a', { className: 'a-src', href: info.meta.url, target: '_blank', rel: 'noopener noreferrer', textContent: `原文：${info.meta.url}` }));
+  }
+  head.append(el('p', { className: 'a-note', textContent: info.meta?.snapshot ? '下面是入库时保存的原文副本，英文段落右侧是中文译文。' : '下面是你放进来的笔记原文。' }));
+  host.replaceChildren(head);
+  tab.observer = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting) loadArticlePage(tab.rows[Number(e.target.dataset.page) - 1]);
+  }, { root: host, rootMargin: '600px 0px' });
+  tab.rows = tab.layout.pages.map((pg) => {
+    const sec = el('section', { className: 'a-page' });
+    sec.dataset.page = pg.page;
+    const cells = new Map();
+    pg.paras.forEach((p, i) => {
+      if (p.kind === 'frag' && !p.text.startsWith('[图')) return;
+      const en = el(p.kind === 'heading' ? `h${Math.min(p.level + 1, 4)}` : 'p', { className: 'a-en', textContent: p.text });
+      const row = el('div', { className: `a-row k-${p.kind}` }, en);
+      if (p.kind === 'text' || p.kind === 'heading') {
+        const zh = el(p.kind === 'heading' ? `h${Math.min(p.level + 1, 4)}` : 'p', { className: 'a-zh wait', textContent: '…' });
+        row.append(zh);
+        cells.set(i, zh);
+      }
+      sec.append(row);
+    });
+    host.append(sec);
+    tab.observer.observe(sec);
+    return { tab, pg, sec, cells, zhState: null };
+  });
+  if (!tab.rows.some((r) => r.cells.size)) host.classList.add('native'); // already Chinese
+  updatePageInd();
+}
+
+async function loadArticlePage(r) {
+  if (!r || r.zhState || !r.cells.size) return;
+  r.zhState = 'loading';
+  try {
+    for await (const { event, data } of sseStream(`/api/paper/${r.tab.id}/zh/${r.pg.page}`)) {
+      if (r.tab.closed) return;
+      if (event === 'para') {
+        const c = r.cells.get(data.i);
+        if (c) {
+          c.textContent = data.zh;
+          c.classList.remove('wait');
+        }
+      } else if (event === 'error') throw new Error(data.message);
+    }
+    r.zhState = 'done';
+  } catch (e) {
+    if (r.tab.closed) return;
+    r.zhState = null;
+    for (const c of r.cells.values()) if (c.classList.contains('wait')) c.textContent = `翻译失败：${e.message}（滚动回来会重试）`;
   }
 }
 
@@ -565,6 +633,12 @@ async function loadTranslation(r) {
 
 function relayoutTab(tab) {
   if (tab.kind !== 'paper' || !tab.rows.length || tab.view.hidden) return;
+  if (tab.info?.format === 'markdown') {
+    tab.view.classList.remove('mode-dual', 'mode-orig', 'mode-zh');
+    tab.view.classList.add(`mode-${state.mode}`);
+    tab.view.style.setProperty('--az', state.zoom);
+    return;
+  }
   tab.view.className = `pages mode-${state.mode}`;
   for (const r of tab.rows) {
     r.g = geometry(tab, r.pg);
@@ -601,6 +675,7 @@ window.addEventListener('resize', () => {
 function updatePageInd() {
   const tab = activeTab();
   if (tab?.kind !== 'paper' || !tab.rows.length) return void ($('#page-ind').textContent = '');
+  if (tab.info?.format === 'markdown') return void ($('#page-ind').textContent = '网络文章');
   const host = tab.view;
   const mid = host.scrollTop + host.clientHeight / 3;
   const r = tab.rows.find((x) => x.row.offsetTop + x.row.offsetHeight > mid) ?? tab.rows.at(-1);
@@ -608,7 +683,7 @@ function updatePageInd() {
 }
 
 function goPage(tab, n) {
-  const go = () => tab.rows[n - 1]?.row.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const go = () => tab.info?.format !== 'markdown' && tab.rows[n - 1]?.row.scrollIntoView({ behavior: 'smooth', block: 'start' });
   if (tab.rows.length) return go();
   // Not loaded yet (e.g. opened from a comparison): wait for it.
   const t = setInterval(() => {
@@ -1075,13 +1150,16 @@ const pop = $('#pop');
 const DEFAULT_Q = '类似的做法还有谁做了？不要求完全一样，论文、博客、报道、帖子都可以。我想看看这一类做法有哪些变体，判断哪种最合适。';
 
 function selectionSource(sel) {
-  const node = sel?.anchorNode?.parentElement;
-  const inPage = node?.closest('.textLayer');
-  const inZh = node?.closest('.zh .p');
+  const a = sel?.anchorNode;
+  const node = a?.nodeType === Node.ELEMENT_NODE ? a : a?.parentElement; // triple-click selects whole elements
+  const inPage = node?.closest('.textLayer, .a-en');
+  const inZh = node?.closest('.zh .p, .a-zh');
   if (!inPage && !inZh) return null;
   const tab = activeTab();
   if (tab?.kind !== 'paper') return null;
-  return { tab, page: Number(node.closest('.row')?.dataset.page) || null, original: !!inPage };
+  // Articles have no real pages; only PDFs pass a page number on.
+  const page = tab.info?.format === 'markdown' ? null : Number(node.closest('.row')?.dataset.page) || null;
+  return { tab, page, original: !!inPage };
 }
 
 document.addEventListener('mouseup', (e) => {

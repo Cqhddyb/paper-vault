@@ -130,3 +130,10 @@ test('transient gateway errors are retried, others fail at once', async () => {
   await assert.rejects(withRetry(() => (m++, Promise.reject(new Error('总结不合格'))), { waitMs: 1 }), /不合格/);
   assert.equal(m, 1);
 });
+
+test('a thousands separator inside a number does not split a frontmatter list', () => {
+  const { meta } = parseFrontmatter('---\ndatasets: [200,000+ 并行仿真环境, LIBERO, 约 1,605 条轨迹]\n---\nbody');
+  assert.deepEqual(meta.datasets, ['200,000+ 并行仿真环境', 'LIBERO', '约 1,605 条轨迹']);
+  const back = parseFrontmatter(serializeFrontmatter(meta, 'b')).meta;
+  assert.deepEqual(back.datasets, meta.datasets);
+});

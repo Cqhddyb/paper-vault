@@ -179,17 +179,52 @@ const commands = {
     await watch({ once: flag(args, '--once') });
   },
 
-  async serve() {
+  async serve(args) {
     // One background process for everything: the assistant web server plus
     // the inbox watcher (the watcher exits quietly if another one holds the lock).
-    const { startServer } = await import('../lib/server.mjs');
-    const desktop = await import('../lib/desktop.mjs');
     const d = ensureLayout(dirs().root);
     const log = (msg) => {
       const line = `[${new Date().toISOString()}] ${msg}`;
       console.log(line);
       fs.appendFileSync(path.join(d.staging, 'watch.log'), line + '\n');
     };
+
+    // Supervisor: run the real service as a child and restart it if it crashes,
+    // so one unexpected error does not stop the inbox and the assistant until
+    // the next login. Exit code 0 (e.g. "already running") is not restarted.
+    if (!process.env.PV_SERVE_CHILD && !flag(args, '--no-supervisor')) {
+      const { spawn } = await import('node:child_process');
+      const crashes = [];
+      for (;;) {
+        const code = await new Promise((resolve) => {
+          const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'serve'], { env: { ...process.env, PV_SERVE_CHILD: '1' }, stdio: 'ignore', windowsHide: true });
+          child.on('exit', (c) => resolve(c ?? 1));
+        });
+        if (code === 0) return;
+        const now = Date.now();
+        crashes.push(now);
+        while (crashes.length && now - crashes[0] > 10 * 60_000) crashes.shift();
+        if (crashes.length > 5) {
+          log('服务 10 分钟内崩溃超过 5 次，不再自动重启；请看上面的错误信息');
+          process.exit(1);
+        }
+        log(`服务意外退出（退出码 ${code}），5 秒后自动重启`);
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+    }
+
+    // Record why we die, so a crash can be diagnosed from watch.log.
+    process.on('uncaughtException', (e) => {
+      try {
+        log(`未捕获的错误，服务将重启：${e?.stack ?? e}`);
+      } finally {
+        process.exit(1);
+      }
+    });
+    process.on('unhandledRejection', (e) => log(`未处理的 Promise 错误（服务继续运行）：${e?.stack ?? e}`));
+
+    const { startServer } = await import('../lib/server.mjs');
+    const desktop = await import('../lib/desktop.mjs');
     // Port first: a second `serve` must not start a second hotkey helper.
     let send = null;
     const windowControl = { send: (cmd) => (send ? send(cmd) : false), open: desktop.openWindow };

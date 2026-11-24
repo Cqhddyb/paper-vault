@@ -1,6 +1,6 @@
 ---
 name: add
-description: 把论文 PDF 读完、写总结并存入本地论文库（paper-vault）。用户说“把这篇论文入库/加到论文库/总结一下这篇 PDF 存起来/处理 inbox 里的论文”时使用。参数可以是一个或多个 PDF 路径；不给参数时处理论文库 inbox 里的全部 PDF。
+description: 把论文 PDF（或网络文章的 .md）读完、写总结并存入本地论文库（paper-vault）。用户说“把这篇论文入库/加到论文库/总结一下这篇 PDF 存起来/处理 inbox 里的论文”时使用。参数可以是一个或多个 PDF 路径；不给参数时处理论文库 inbox 里的全部文件。后台服务开着时 inbox 会自动处理，.md 网络文章优先交给后台服务（它会抓取原文）。
 argument-hint: "[pdf 路径...]"
 ---
 

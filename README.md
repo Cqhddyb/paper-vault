@@ -3,6 +3,10 @@
 本地论文库 + Claude Code 插件。
 
 - **自动总结入库**：把论文 PDF 丢进 `inbox/`，后台 watcher 会抽出全文，交给 Claude 写一份中文总结（动机、方法、结果、用到的模型与数据、局限），然后和 PDF 一起归档。
+- **网络文章也能入库**：官方技术博客、技术长文这类没有 PDF 的内容，放一个 `.md` 进 `inbox/` 就行：
+  - 只写了标题和一行 `原始来源：https://...` 的索引笔记：会去抓原网页的正文（直连不通时自动走 Windows 系统代理），按文章写总结，并把抓到的原文存一份副本；你在笔记里写的提醒（比如“性能为公司自报”）也会参考；
+  - 本身就是全文的 `.md`：直接总结。
+  - 入库后和论文一样能检索、讲解、对比、找类似做法；列表里标“网络文章”。阅读时英文段落左边原文、右边译文，逐段对齐。
 - **凭细节找论文**：不用记标题。“我记得有篇用了 Qwen 的 VLA”“在 LIBERO 上测过、用 LoRA 微调”这类描述就能找到。
 - **查相关工作**：说出你要做的事，先查本地库，再上网补充库里没有的论文，并标出最值得读的几篇。
 - **论文小助手**（Ctrl+Alt+P 呼出，再按一次隐藏）：用一句描述调出论文，确定是哪篇就直接打开，不确定就列出候选让你点选；左边讲解论文、可以追问，右边是 PDF 原文与中文逐段对照，选中原文任意一段还能单独翻译；每篇论文一个标签页，勾选 2-5 篇可以对比方法。
@@ -36,6 +40,7 @@ node bin/pv.mjs assistant install       # 开始菜单快捷方式（快捷键 C
 | 想做的事 | 怎么做 |
 |---|---|
 | 新论文入库 | 把 PDF 放进 `D:/Papers/inbox/`，约 1 分钟后出现在 `papers/` 里 |
+| 博客/技术长文入库 | 放一个 `.md`（全文，或者只写标题和 `原始来源：链接`）进 `inbox/` |
 | 手动入库（watcher 没开，或 PDF 在别处） | Claude Code 里 `/paper-vault:add [pdf 路径]` |
 | 凭记忆找论文 | `/paper-vault:search 我记得有篇用 PaliGemma 的，能收桌子` |
 | 查相关工作 | `/paper-vault:related 我想用世界模型给 VLA 做数据增强` |
@@ -48,11 +53,12 @@ node bin/pv.mjs assistant install       # 开始菜单快捷方式（快捷键 C
 
 ```
 D:/Papers/
-  inbox/                       放 PDF 的地方
+  inbox/                       放 PDF 或 .md 的地方
     _failed/                   总结失败的 PDF + .log（修好后挪回 inbox 重试）
     _duplicates/               库里已有的 PDF
   papers/<id>/
     <id>.pdf                   例：2024-kim-openvla-open-source-vision.pdf
+    <id>.md, <id>.source.md    网络文章：你放进来的笔记，和入库时抓到的原文副本
     summary.md                 YAML frontmatter + 中文总结
     .reader/                   小助手缓存：段落版面、逐页译文、讲解对话（删掉会重新生成）
   .staging/                    草稿、watch.log、watcher 锁
@@ -121,3 +127,7 @@ node bin/pv.mjs help
 ```bash
 npm test
 ```
+
+## 后台服务的稳定性
+
+`pv serve` 由一个小的看护进程启动：服务意外退出时 5 秒后自动重启（10 分钟内崩溃超过 5 次就停下，免得反复重启），崩溃原因会写进 `D:/Papers/.staging/watch.log`。调试时可以用 `node bin/pv.mjs serve --no-supervisor` 直接在前台运行。
